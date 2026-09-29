@@ -158,6 +158,22 @@ class ProteinEngine {
     private var titratable = IntArray(0)
     private var charged = IntArray(0); private var nCharged = 0
     private var rBox = 40.0
+
+    /**
+     * How tightly several chains are packed: 0 dilute, 1 crowded, 2 cell-like (the cytoplasm is 20–40% protein).
+     * Sets the confining sphere so the folded protein fills 3%, 12% or 25% of it. Single chains ignore it.
+     */
+    var crowding = 2
+        set(v) { field = v.coerceIn(0, 2); if (n > 0) rBox = boxRadius() }
+    private fun boxRadius(): Double {
+        val single = 5 * sqrt(n.toDouble()) + 10
+        if (nChains <= 1) return single
+        val folded = 3.18 * Math.cbrt(n.toDouble())          // radius of the packed protein, ~135 Å³ per residue
+        val fraction = doubleArrayOf(0.03, 0.12, 0.25)[crowding]
+        return max(folded / Math.cbrt(fraction), folded + 10)
+    }
+    /** Radius of the sphere the chains are kept in, Å. */
+    val boxSize get() = rBox
     private var stepCount = 0L
 
     // Neighbour lists
@@ -274,7 +290,7 @@ class ProteinEngine {
         cys = (0 until n).filter { seq[it] == 'C' }.toIntArray()
         titratable = sites.map { it.res }.distinct().sorted().toIntArray()
         charged = IntArray(n)
-        rBox = 5 * sqrt(n.toDouble()) + 10 + 8 * sqrt(nChains.toDouble())
+        rBox = boxRadius()
         loadStructure(protein)
         events.clear(); flashes.clear(); time = 0.0; stepCount = 0
         grab = -1
@@ -323,7 +339,8 @@ class ProteinEngine {
         // Chains start about two coil-widths apart: separate, but close enough to find each other
         var longest = 1
         for (c in 0 until nChains) longest = maxOf(longest, chainStart[c + 1] - chainStart[c])
-        val spacing = if (nChains > 1) 3.0 * sqrt(longest.toDouble()) + 12 else 0.0
+        // …and inside the box, so crowding holds from the start
+        val spacing = if (nChains > 1) min(3.0 * sqrt(longest.toDouble()) + 12, 1.4 * rBox / max(side - 1, 1)) else 0.0
         val keepAll = 0.75 * rBox
         // With a known complex, each chain starts around its real place in it, pushed further out (DISSOCIATE):
         // the complex begins dissociated, with every subunit facing its real partners
@@ -683,9 +700,9 @@ class ProteinEngine {
             fx[i] -= 0.01 * cx; fy[i] -= 0.01 * cy; fz[i] -= 0.01 * cz
             val r = sqrt(x[i] * x[i] + y[i] * y[i] + z[i] * z[i])
             if (r > rBox) {
-                val f = -5 * (r - rBox) / r
+                val f = -min(5 * (r - rBox), FMAX) / r
                 fx[i] += f * x[i]; fy[i] += f * y[i]; fz[i] += f * z[i]
-                if (measure) eBox += 2.5 * (r - rBox) * (r - rBox)
+                if (measure) { val d = r - rBox; val dc = FMAX / 5; eBox += if (d < dc) 2.5 * d * d else 2.5 * dc * dc + FMAX * (d - dc) }
             }
         }
         if (measure) eBox += 0.005 * n * (cx * cx + cy * cy + cz * cz)

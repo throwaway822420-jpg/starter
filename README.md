@@ -45,13 +45,20 @@ Each bead is one amino acid, placed at its Cα atom. The chain moves under Lange
 
 **Several chains:** chains interact through exactly the same contact, electrostatic and disulfide terms as residues within one chain. That's how insulin's chains pair up, how hemoglobin subunits stick together, and how amyloid peptides clump. The readout counts the contacts between chains and the size of the largest complex.
 
+**Crowding:** chains only interact if they meet. With several chains, they're kept in a sphere sized so the folded protein fills a set share of it. The default, **cell-like**, is 25%, since the cytoplasm is 20–40% protein. **Crowded** is 12% and **dilute** is 3%. The effect, measured over 60 seconds at desktop speed:
+- **Amyloid-β ×6:** before this, only 3 of 6 peptides ever clumped; now all 6 do within 20 seconds.
+- **Two GCN4 chains without guidance:** before, they never met; now they find each other within 30 seconds.
+- **Hemoglobin:** before, only 2 subunits came together; now all 4 do, and within 2–3 minutes they settle to about 8 Å from the real tetramer.
+
+Single chains keep the roomier sphere they need to unfold.
+
 **Scaling:** non-bonded pairs come from neighbour lists rebuilt on a spatial grid, so the cost grows roughly linearly with size. A 3000-residue chain takes about 1 ms per step on a desktop CPU.
 
 **Real structures (Android app):** most presets come with their experimental structure from the Protein Data Bank. The Cα positions are baked in by `tools/extract_native.py`, which aligns each PDB chain to the UniProt-checked sequence and prints a coverage and identity report. With a structure, a structure-based ("Gō-model") layer steers folding toward it:
 - residue pairs that touch in the real structure attract, with a well centred on their real distance. Cutoffs are 7.5 Å for pairs close in sequence and 10 Å for distant pairs and pairs across chains, because packed helices sit 8–11 Å apart at their Cα atoms.
 - bond angles and twists are pulled toward their real values.
 - a weak long-range pull between residues on either side of a real interface. It stands in for the diffusion and electrostatic steering that bring partners together, which would take far too long to simulate.
-- complexes start dissociated, each chain unfolded around its real position, pushed 40% further out.
+- complexes start dissociated, each chain unfolded around its real position, pushed 40% further out, inside the crowding sphere.
 
 The **Native-structure guidance** slider blends from generic physics (0%) to fully guided (100%, the default). The readout shows:
 - **native contacts (Q):** the share of the real structure's contacts that have formed.
@@ -60,7 +67,7 @@ The **Native-structure guidance** slider blends from generic physics (0%) to ful
 Measured at desktop speed, starting from an unfolded chain:
 - **Small and medium proteins:** Trp-cage, chignolin, villin, ubiquitin and myoglobin usually reach their crystal structures (RMSD 1–3 Å) within 20–60 seconds. BPTI often does.
 - **Small complexes:** insulin's two chains and the GCN4 dimer assemble correctly within about 40 seconds.
-- **Larger proteins:** lysozyme, GFP and the hemoglobin tetramer take several minutes and can get stuck. For those, set "Heat to unfold every" to 5 minutes or Never.
+- **Larger proteins:** lysozyme, GFP and the hemoglobin tetramer take several minutes and can get stuck. With cell-like crowding, hemoglobin reaches about 8 Å from the real tetramer in 2–3 minutes. For those, set "Heat to unfold every" to 5 minutes or Never.
 
 On a tablet everything runs slower than these figures.
 

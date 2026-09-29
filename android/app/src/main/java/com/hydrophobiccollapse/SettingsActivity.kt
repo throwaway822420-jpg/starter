@@ -128,6 +128,11 @@ class SettingsActivity : Activity() {
             "${it.roundToInt()} mM · λD ${if (debye < 100) "%.1f".format(debye) else ">96"} Å"
         }) { update(s.copy(salt = it.roundToInt())) })
         col.addView(slider("Redox buffer", -1f, 1f, 0.1f, s.redox, { redoxLabel(it) }) { update(s.copy(redox = it)) })
+        col.addView(label("Crowding (when there are several chains)"), margins(top = 10))
+        val crowdingNames = listOf("Dilute: protein fills 3% of the space", "Crowded: 12%", "Cell-like: 25%, as in cytoplasm")
+        col.addView(spinner(crowdingNames, s.crowding.coerceIn(0, 2)) { idx ->
+            if (idx != s.crowding) update(s.copy(crowding = idx))
+        }, margins(top = 4))
 
         col.addView(section("Playback"))
         col.addView(slider("Simulation speed", 0.25f, 3f, 0.25f, s.speed, { "${it}×" }) { update(s.copy(speed = it)) })

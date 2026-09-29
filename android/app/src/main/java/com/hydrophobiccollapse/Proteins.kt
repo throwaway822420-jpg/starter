@@ -273,6 +273,7 @@ data class Settings(
     val randomOnWake: Boolean = true,
     val customJson: String = "[]",
     val nativeBias: Float = 1f,
+    val crowding: Int = 2,
 ) {
     fun save(p: SharedPreferences) {
         p.edit()
@@ -280,7 +281,7 @@ data class Settings(
             .putFloat("redox", redox).putFloat("speed", speed).putInt("cycle", cycle)
             .putBoolean("hud", hud).putBoolean("saver", saver)
             .putInt("randomLength", randomLength).putInt("randomStyle", randomStyle).putBoolean("randomOnWake", randomOnWake)
-            .putString("customJson", customJson).putFloat("nativeBias", nativeBias)
+            .putString("customJson", customJson).putFloat("nativeBias", nativeBias).putInt("crowding", crowding)
             .apply()
     }
 
@@ -308,6 +309,7 @@ data class Settings(
                 randomOnWake = p.getBoolean("randomOnWake", d.randomOnWake),
                 customJson = p.getString("customJson", d.customJson) ?: d.customJson,
                 nativeBias = p.getFloat("nativeBias", d.nativeBias),
+                crowding = p.getInt("crowding", d.crowding),
             )
         }
 

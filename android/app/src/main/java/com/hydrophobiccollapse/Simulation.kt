@@ -108,6 +108,7 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         settings = s
         eng.pH = s.ph.toDouble(); eng.saltMM = s.salt.toDouble(); eng.redox = s.redox.toDouble()
         eng.nativeBias = s.nativeBias.toDouble()
+        eng.crowding = s.crowding
         val reload = when {
             !loaded -> true
             s.protein == Proteins.RANDOM_ID -> old.protein != s.protein || old.randomLength != s.randomLength || old.randomStyle != s.randomStyle

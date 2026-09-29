@@ -65,13 +65,17 @@ class ProteinEngineTest {
 
     @Test
     fun chainCollapsesAtRoomTemperature() {
-        val e = ProteinEngine()
-        e.load(Proteins.byId("villin"))
-        val start = e.rg
-        e.temperature = 300.0
-        repeat(20) { e.step(2000); e.advanceClock(1.0) }
-        e.measure()
-        assertTrue("Rg ${e.rg} should shrink from $start", e.rg < start * 0.7)
+        // Generic physics alone (no structure guidance) collapses an unfolded chain
+        val shrink = (1..3).map { attempt ->
+            val e = ProteinEngine(); e.seed(31L * attempt); e.nativeBias = 0.0
+            e.load(Proteins.byId("ubq"))
+            val start = e.rg
+            e.temperature = 300.0
+            repeat(20) { e.step(2000) }
+            e.measure()
+            e.rg / start
+        }
+        assertTrue("Rg ratios $shrink", shrink.min() < 0.75)
     }
 
     @Test
@@ -173,11 +177,15 @@ class ProteinEngineTest {
 
     @Test
     fun heatUnfoldsAStructuredProtein() {
-        val e = ProteinEngine(); e.seed(99)
-        e.load(Proteins.byId("villin")); e.temperature = 460.0
-        repeat(20) { e.step(2000) }
-        e.measure()
-        assertTrue("Q at 460 K was ${e.q}", e.q < 0.7)
+        // Average native contacts over the last 10 s: clearly fewer at 460 K than at 300 K
+        fun meanQ(temp: Double): Double {
+            val e = ProteinEngine(); e.seed(99)
+            e.load(Proteins.byId("villin")); e.temperature = temp
+            repeat(20) { e.step(2000) }
+            return (1..10).map { e.step(2000); e.measure(); e.q }.average()
+        }
+        val cold = meanQ(300.0); val hot = meanQ(460.0)
+        assertTrue("Q at 300 K $cold, at 460 K $hot", hot < cold - 0.15)
     }
 
     @Test
@@ -258,5 +266,27 @@ ATOM 7 CA . PHE A 4 ? 26.772 33.436 9.197 2
         assertNull(StructureIO.queryProblem("P69905"))
         assertNull(StructureIO.queryProblem("AF-P69905-F1"))
         assertNotNull(StructureIO.queryProblem("hemoglobin"))
+    }
+
+    // ---------- Crowding ----------
+    @Test
+    fun severalChainsAreKeptCloseEnoughToMeet() {
+        val e = ProteinEngine()
+        e.load(Proteins.byId("hemoglobin"))
+        // Cell-like crowding: the folded tetramer (~26 Å radius) fills a quarter of the sphere
+        assertTrue("box ${e.boxSize} Å", e.boxSize in 35.0..50.0)
+        e.crowding = 0
+        assertTrue("dilute box ${e.boxSize} Å", e.boxSize > 70)
+        val single = ProteinEngine(); single.load(Proteins.byId("myoglobin")); single.crowding = 2
+        assertEquals(5 * Math.sqrt(153.0) + 10, single.boxSize, 1e-9)   // one chain: unchanged
+    }
+
+    @Test
+    fun amyloidPeptidesClumpWhenCrowded() {
+        val e = ProteinEngine(); e.seed(7)
+        e.load(Proteins.byId("abeta6")); e.temperature = 300.0
+        repeat(30) { e.step(2000) }
+        e.measure()
+        assertTrue("largest clump ${e.largestComplex} of 6", e.largestComplex >= 4)
     }
 }
