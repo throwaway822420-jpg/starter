@@ -1,51 +1,72 @@
 # Hydrophobic Collapse
 
-An interactive live wallpaper that folds a protein in real time. The whole thing is one file, `index.html`.
+An interactive live wallpaper that folds real protein sequences in 3D, with real solution chemistry. The whole thing is one file, `index.html`. The original 2D version is kept in `classic.html`.
 
 ## What it simulates
 
-This is a 2D **HP model**, a classic simplified model of protein folding. Each bead is one residue:
+Each bead is one amino acid, placed at its Cα atom. The chain moves under Langevin dynamics in implicit water, which means random thermal kicks plus friction. Units are real: Å, kcal/mol and kelvin.
 
-- **H (amber):** hydrophobic. H beads attract each other, so they pack into a core away from water.
-- **P (teal rings):** polar. P beads only repel, so they end up on the surface as loops.
+**Physics**
+- Cα–Cα bonds of 3.8 Å.
+- Virtual bond-angle and dihedral preferences for α-helix (91°, +50°) and β-strand (120°, −170°). Each residue's preference is weighted by its Chou–Fasman propensity.
+- An i→i+4 helical hydrogen-bond term. Proline weakens it, because proline breaks helices.
+- Residue-specific contact attraction, scaled from Kyte–Doolittle hydropathy, with residue sizes.
+- Debye–Hückel screened electrostatics in water (ε = 80). The screening length follows the salt concentration.
 
-The chain moves under Langevin dynamics, which means random thermal kicks from the solvent plus friction. The model uses:
+**Chemistry (Monte Carlo)**
+- **Constant-pH titration:** Asp, Glu, His, Cys, Tyr, Lys, Arg and both chain ends gain and lose protons. Each change is accepted or rejected using the pKa, the pH and the local electrostatic field, so buried or crowded charges shift on their own.
+- **Disulfide chemistry:** two cysteines within reach can oxidize into a disulfide. This needs a thiolate (a deprotonated cysteine), so it depends on pH. The redox buffer reduces disulfides back. A free thiolate can attack an existing disulfide and swap partners. This thiol–disulfide shuffling is how BPTI finds its three native bonds.
 
-- bond springs
-- mild backbone stiffness
-- Lennard-Jones attraction between H beads
+**Limits:** this is a teaching-grade coarse-grained model, not a structure predictor. Proteins collapse, form helices and strands, and make and break disulfides with the right trends, but they won't reliably reach their true native fold. Atom-level simulation of folding needs supercomputers.
 
-About once a minute it heats the chain until it unfolds, then cools it so it folds again.
+## Proteins
 
-The sequences are the standard 2D HP benchmark set (20 to 64 residues), plus a random one. This is a teaching model, not real protein chemistry.
+| Protein | Residues | Why it's interesting |
+| --- | --- | --- |
+| BPTI | 58 | Three native disulfides (5–55, 14–38, 30–51); the classic disulfide folding study |
+| Villin headpiece HP35 | 35 | A fast-folding three-helix bundle |
+| Trp-cage TC5b | 20 | A designed miniprotein |
+| GB1 hairpin | 16 | A β-hairpin that folds on its own |
+| Amyloid-β 1–42 | 42 | The Alzheimer's peptide, mostly disordered |
+| Ubiquitin | 76 | Mixed helix and sheet |
 
-The readout (bottom-left) shows:
+## On screen
 
-- **Energy:** the energy from residue contacts, in ε units. Lower means more folded.
-- **H–H contacts:** how many hydrophobic pairs are touching.
-- **Rg:** radius of gyration, meaning how compact the chain is, in bead diameters (σ).
-- **Energy, last 60 s:** a trace of the energy. The dashed line is the lowest energy since the last unfold.
-- **Contact map:** the upper-right triangle shows contacts right now. The lower-left triangle shows how often each contact has formed recently.
+- **Residue colours:**
+  - amber: hydrophobic
+  - teal: polar
+  - blue with +: positive
+  - rose with −: negative
+  - yellow: cysteine
+  - grey: Gly and Pro
+
+  Colours follow each residue's current charge, so changing the pH visibly recolours the protein.
+- **Backbone:**
+  - lavender: helix
+  - mint: strand
+  - yellow link: disulfide
+  - dashed line: salt bridge
+- **Flashes:**
+  - small rings: proton transfers
+  - yellow bursts: disulfide reactions
+- **Readout:**
+  - conditions: temperature, pH and salt
+  - the sequence, with helix and strand underlines
+  - energy, radius of gyration, helix and strand content, net charge, salt bridges and disulfides
+  - a 60-second energy trace
+  - a contact map. Upper triangle: contacts now. Lower triangle: recent contact frequency. Dim yellow: native disulfide pairs.
+  - a feed of reactions and heating events
 
 ## Controls
 
 | Gesture | What it does |
 | --- | --- |
-| Drag a bead | Pull the chain |
-| Tap open space | Stir the solvent |
-| Double-tap | Unfold now |
+| Drag a residue | Pull it |
+| Drag open space | Rotate the molecule |
+| Tap | Stir the water |
+| Double-tap | Heat to unfold |
 | Long-press | Open settings |
 
-In settings you can pick the sequence and simulation speed, set how often it unfolds, hide the readout, and turn on battery saver (30 fps).
+In settings you can pick the protein and set the temperature, pH, salt, redox buffer, speed and heat cycle, show or hide the readout, and turn on battery saver.
 
-Add `#clean` to the end of the URL to hide the readout and the settings button. This mode is meant for the wallpaper. Long-press still opens settings.
-
-## Setting it as a wallpaper on a Galaxy Tab S11
-
-1. Install an HTML/web live wallpaper app from the Play Store. Search for "web live wallpaper" or "HTML live wallpaper".
-2. Give the app the page. You can do this in one of two ways:
-   - **URL:** turn on GitHub Pages for this repo (Settings → Pages → deploy from this branch, root folder). Then use `https://<your-username>.github.io/starter/#clean`.
-   - **Local file:** download `index.html` to the tablet and choose it in the app, if the app supports local files.
-3. Set it as the home screen wallpaper. Many wallpaper apps pass taps but not drags, so tapping and double-tapping always work, while dragging a bead depends on the app.
-
-It pauses when the wallpaper isn't visible. Battery saver halves the frame rate if you want to save more power.
+Add `#clean` to the end of the URL to hide the readout and the settings button.

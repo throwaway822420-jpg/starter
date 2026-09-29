@@ -8,19 +8,26 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;600&family=Martian+Mono:wght@400;500&display=swap">
 <style>
-/* Layout: full-bleed simulation canvas; a quiet readout docked bottom-left, settings behind a corner button.
-   Single dark world on purpose: it is a wallpaper, and the beads read best on a dark field. */
+/* Layout: full-bleed 3D molecule; a quiet readout docked bottom-left; settings behind a corner button.
+   Single dark world on purpose: it is a wallpaper, and residues read best on a dark field.
+   Residue colours follow chemistry: amber hydrophobic, teal polar, blue positive, rose negative,
+   sulfur yellow for cysteine (the CPK colour for S), grey for glycine and proline. */
 :root {
-  --ink: #0a0f1d;          /* solvent field */
-  --ink-edge: #04060c;     /* vignette edge */
-  --panel: rgba(13, 19, 36, 0.74);
+  --ink: #0a0f1d;
+  --ink-edge: #04060c;
+  --panel: rgba(13, 19, 36, 0.76);
   --line: rgba(160, 176, 214, 0.16);
   --text: #e4e8f3;
-  --haze: #8a94b0;         /* secondary text, a blue-biased grey */
-  --hydro: #f0a44b;        /* H residues: hydrophobic, buried in the core */
-  --hydro-dim: #7d6247;    /* H residues still exposed to solvent */
-  --polar: #74cfc0;        /* P residues: polar, stay on the surface */
-  --bond: rgba(186, 198, 228, 0.40);
+  --haze: #8a94b0;
+  --hydro: #f0a44b;
+  --polar: #74cfc0;
+  --pos: #8ea2ff;
+  --neg: #ff7d8e;
+  --sulfur: #f3d34a;
+  --special: #9aa3b8;
+  --helix: #c4b1ff;
+  --strand: #9fe3a8;
+  --bond: #5d6784;
 
   --f-ui: "Hanken Grotesk", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --f-data: "Martian Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
@@ -40,21 +47,16 @@ body {
   user-select: none;
   -webkit-tap-highlight-color: transparent;
 }
-#sim {
-  position: fixed;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  display: block;
-  touch-action: none;
-}
+#sim { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
 
 /* Readout */
 .hud {
   position: fixed;
   left: max(16px, env(safe-area-inset-left, 0px));
   bottom: calc(16px + env(safe-area-inset-bottom, 0px));
-  width: min(320px, calc(100vw - 32px));
+  width: min(340px, calc(100vw - 32px));
+  max-height: calc(100% - 100px);
+  overflow: hidden;
   box-sizing: border-box;
   padding: 14px 16px;
   display: grid;
@@ -66,92 +68,41 @@ body {
   backdrop-filter: blur(8px);
   pointer-events: none;
 }
-.hud-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
-}
-.phase {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-weight: 600;
-  font-size: 15px;
-}
-.phase-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--polar);
-  transition: background 0.4s;
-}
+.hud-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.phase { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 15px; }
+.phase-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--polar); transition: background 0.4s; }
 .phase[data-hot="true"] .phase-dot { background: var(--hydro); }
-.temp, .seq-name, dd, .cap {
-  font-family: var(--f-data);
-  font-variant-numeric: tabular-nums;
-}
-.temp { font-size: 12px; color: var(--haze); }
-.seq-block { display: grid; gap: 6px; }
-.seq-name { font-size: 10px; color: var(--haze); letter-spacing: 0.02em; }
-.seq {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 2px;
-}
-.seq i {
-  width: 6px;
-  height: 6px;
-  border-radius: 1px;
-  box-sizing: border-box;
-}
-.seq i.h { background: var(--hydro-dim); }
-.seq i.h.on { background: var(--hydro); }
-.seq i.p { border: 1px solid var(--polar); opacity: 0.7; }
-.stats {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
-  margin: 0;
-}
+.cond, .pname, dd, .cap, .seq, .feed { font-family: var(--f-data); font-variant-numeric: tabular-nums; }
+.cond { font-size: 11px; color: var(--haze); white-space: nowrap; }
+.pblock { display: grid; gap: 6px; min-width: 0; }
+.pname { font-size: 10px; color: var(--haze); }
+.seq { font-size: 10px; line-height: 1.55; letter-spacing: 0.04em; word-break: break-all; }
+.seq span { border-bottom: 2px solid transparent; }
+.seq span.h { border-bottom-color: var(--helix); }
+.seq span.e { border-bottom-color: var(--strand); }
+.stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px 8px; margin: 0; }
 .stats div { min-width: 0; }
-dt {
-  font-size: 9.5px;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--haze);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-dd { margin: 3px 0 0; font-size: 14px; }
-dd small { font-size: 10px; color: var(--haze); }
-.plots {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 64px;
-  gap: 12px;
-  align-items: end;
-}
+dt { font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--haze); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+dd { margin: 3px 0 0; font-size: 13.5px; white-space: nowrap; }
+dd small { font-size: 9.5px; color: var(--haze); }
+.plots { display: grid; grid-template-columns: minmax(0, 1fr) 64px; gap: 12px; align-items: end; }
 .plot { display: grid; gap: 4px; min-width: 0; }
 #spark { width: 100%; height: 40px; display: block; }
-#cmap {
-  width: 64px;
-  height: 64px;
-  display: block;
-  image-rendering: pixelated;
-  border-radius: 2px;
-}
+#cmap { width: 64px; height: 64px; display: block; image-rendering: pixelated; border-radius: 2px; }
 .cap { font-size: 9px; color: var(--haze); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.feed { display: grid; gap: 3px; font-size: 10px; color: var(--haze); min-height: 3.9em; }
+.feed div { display: flex; gap: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.feed b { font-weight: 400; color: var(--text); overflow: hidden; text-overflow: ellipsis; }
+.feed i { font-style: normal; flex: none; width: 3.2em; }
+.feed .ss b { color: var(--sulfur); }
 
 /* Settings */
 .gear {
   position: fixed;
   top: calc(16px + env(safe-area-inset-top, 0px));
   right: max(16px, env(safe-area-inset-right, 0px));
-  width: 40px;
-  height: 40px;
-  display: grid;
-  place-items: center;
+  width: 40px; height: 40px;
+  display: grid; place-items: center;
   padding: 0;
   border-radius: 50%;
   border: 1px solid var(--line);
@@ -160,103 +111,80 @@ dd small { font-size: 10px; color: var(--haze); }
   cursor: pointer;
 }
 .gear:hover { color: var(--text); }
-.gear:focus-visible, .sheet :focus-visible {
-  outline: 2px solid var(--polar);
-  outline-offset: 2px;
-}
+.gear:focus-visible, .sheet :focus-visible { outline: 2px solid var(--polar); outline-offset: 2px; }
 .sheet {
   position: fixed;
   top: calc(66px + env(safe-area-inset-top, 0px));
   right: max(16px, env(safe-area-inset-right, 0px));
-  width: min(300px, calc(100vw - 32px));
+  width: min(320px, calc(100vw - 32px));
+  max-height: calc(100% - 90px);
+  overflow-y: auto;
   box-sizing: border-box;
   padding: 16px;
   display: grid;
   gap: 14px;
-  background: rgba(13, 19, 36, 0.94);
+  background: rgba(13, 19, 36, 0.95);
   border: 1px solid var(--line);
   border-radius: 10px;
   font-size: 13px;
 }
-.sheet h2 {
-  margin: 0;
-  font-size: 15px;
-  font-weight: 600;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
+.sheet h2 { margin: 0; font-size: 15px; font-weight: 600; display: flex; justify-content: space-between; align-items: center; }
+.sheet h3 { margin: 4px 0 -4px; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.1em; color: var(--haze); }
 .field { display: grid; gap: 6px; }
 .field label, .check span { color: var(--haze); font-size: 12px; }
 .field-row { display: flex; align-items: center; gap: 10px; }
 .field-row input { flex: 1; min-width: 0; accent-color: var(--hydro); }
-output { font-family: var(--f-data); font-size: 12px; min-width: 3.5em; text-align: right; }
-select {
-  font: inherit;
-  color: var(--text);
-  background: var(--ink);
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 7px 8px;
-}
+output { font-family: var(--f-data); font-size: 11px; min-width: 6.5em; text-align: right; color: var(--text); }
+.hint { font-size: 11px; color: var(--haze); margin: -2px 0 0; }
+select { font: inherit; color: var(--text); background: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 7px 8px; }
 .check { display: flex; align-items: center; gap: 8px; }
 .check input { accent-color: var(--hydro); width: 16px; height: 16px; margin: 0; }
 .check span { color: var(--text); font-size: 13px; }
-.btn {
-  font: inherit;
-  font-weight: 600;
-  padding: 9px 12px;
-  border-radius: 6px;
-  border: 0;
-  cursor: pointer;
-  background: var(--hydro);
-  color: var(--ink);
-}
-.btn-ghost {
-  font: inherit;
-  font-size: 12px;
-  padding: 4px 8px;
-  border-radius: 6px;
-  border: 1px solid var(--line);
-  background: transparent;
-  color: var(--haze);
-  cursor: pointer;
-}
+.btns { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.btn { font: inherit; font-weight: 600; padding: 9px 12px; border-radius: 6px; border: 0; cursor: pointer; background: var(--hydro); color: var(--ink); }
+.btn.alt { background: transparent; color: var(--text); border: 1px solid var(--line); }
+.btn-ghost { font: inherit; font-size: 12px; padding: 4px 8px; border-radius: 6px; border: 1px solid var(--line); background: transparent; color: var(--haze); cursor: pointer; }
 .help { margin: 0; color: var(--haze); font-size: 12px; line-height: 1.5; }
 .help b { color: var(--text); font-weight: 600; }
+.key { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px; font-size: 11px; color: var(--haze); }
+.key span { display: flex; align-items: center; gap: 6px; }
+.key i { width: 9px; height: 9px; border-radius: 50%; flex: none; }
 
-/* #clean: wallpaper mode, nothing but the molecule. Long-press still opens settings. */
 body.clean .gear { opacity: 0; pointer-events: none; }
 body.no-hud .hud { display: none; }
 </style>
 </head>
 <body>
-<canvas id="sim" aria-label="Protein folding simulation. Drag a bead to pull the chain, double-tap to unfold it."></canvas>
+<canvas id="sim" aria-label="3D protein folding simulation. Drag a residue to pull it, drag empty space to rotate, double-tap to unfold."></canvas>
 
-<section class="hud" id="hud" aria-live="off">
+<section class="hud" id="hud">
   <div class="hud-head">
     <div class="phase" id="phase" data-hot="false"><span class="phase-dot"></span><span id="phaseText">Folding</span></div>
-    <div class="temp" id="temp">T* 0.40</div>
+    <div class="cond" id="cond">300 K · pH 7.0 · 150 mM</div>
   </div>
-  <div class="seq-block">
-    <div class="seq-name" id="seqName">Benchmark 48-mer</div>
-    <div class="seq" id="seqStrip"></div>
+  <div class="pblock">
+    <div class="pname" id="pname">BPTI · 58 residues</div>
+    <div class="seq" id="seq"></div>
   </div>
   <dl class="stats">
-    <div><dt>Energy</dt><dd id="energy">0.0 <small>ε</small></dd></div>
-    <div><dt>H–H contacts</dt><dd id="contacts">0</dd></div>
-    <div><dt>Rg</dt><dd id="rg">0.0 <small>σ</small></dd></div>
+    <div><dt>Energy</dt><dd id="sE">0 <small>kcal/mol</small></dd></div>
+    <div><dt>Rg</dt><dd id="sRg">0 <small>Å</small></dd></div>
+    <div><dt>Helix · strand</dt><dd id="sSS">0 · 0 <small>%</small></dd></div>
+    <div><dt>Net charge</dt><dd id="sQ">0 <small>e</small></dd></div>
+    <div><dt>Salt bridges</dt><dd id="sSB">0</dd></div>
+    <div><dt>Disulfides</dt><dd id="sDS">0</dd></div>
   </dl>
   <div class="plots">
     <div class="plot">
       <canvas id="spark"></canvas>
-      <div class="cap" id="sparkCap">Energy, last 60 s</div>
+      <div class="cap">Energy, last 60 s</div>
     </div>
     <div class="plot">
-      <canvas id="cmap" width="48" height="48"></canvas>
+      <canvas id="cmap" width="58" height="58"></canvas>
       <div class="cap">Contact map</div>
     </div>
   </div>
+  <div class="feed" id="feed"></div>
 </section>
 
 <button class="gear" id="gear" type="button" aria-label="Settings" aria-expanded="false" aria-controls="sheet">
@@ -271,525 +199,987 @@ body.no-hud .hud { display: none; }
 <form class="sheet" id="sheet" hidden>
   <h2>Simulation <button class="btn-ghost" id="closeSheet" type="button">Done</button></h2>
   <div class="field">
-    <label for="seqSel">Sequence</label>
-    <select id="seqSel"></select>
+    <label for="protein">Protein</label>
+    <select id="protein"></select>
+    <p class="hint" id="proteinNote"></p>
   </div>
+  <h3>Solution</h3>
+  <div class="field">
+    <label for="temp">Temperature</label>
+    <div class="field-row"><input id="temp" type="range" min="270" max="420" step="5"><output id="tempOut" for="temp"></output></div>
+  </div>
+  <div class="field">
+    <label for="ph">pH</label>
+    <div class="field-row"><input id="ph" type="range" min="1" max="13" step="0.5"><output id="phOut" for="ph"></output></div>
+  </div>
+  <div class="field">
+    <label for="salt">Salt (NaCl)</label>
+    <div class="field-row"><input id="salt" type="range" min="0" max="1000" step="25"><output id="saltOut" for="salt"></output></div>
+  </div>
+  <div class="field">
+    <label for="redox">Redox buffer</label>
+    <div class="field-row"><input id="redox" type="range" min="-1" max="1" step="0.1"><output id="redoxOut" for="redox"></output></div>
+  </div>
+  <h3>Playback</h3>
   <div class="field">
     <label for="speed">Simulation speed</label>
-    <div class="field-row"><input id="speed" type="range" min="0.25" max="3" step="0.25"><output id="speedOut" for="speed">1×</output></div>
+    <div class="field-row"><input id="speed" type="range" min="0.25" max="3" step="0.25"><output id="speedOut" for="speed"></output></div>
   </div>
   <div class="field">
-    <label for="cycle">Unfold and refold every</label>
+    <label for="cycle">Heat to unfold every</label>
     <select id="cycle">
-      <option value="30">30 seconds</option>
-      <option value="60">1 minute</option>
-      <option value="120">2 minutes</option>
+      <option value="45">45 seconds</option>
+      <option value="90">90 seconds</option>
+      <option value="180">3 minutes</option>
       <option value="300">5 minutes</option>
       <option value="0">Never</option>
     </select>
   </div>
   <label class="check"><input id="showHud" type="checkbox"><span>Show readout</span></label>
   <label class="check"><input id="saver" type="checkbox"><span>Battery saver (30 fps)</span></label>
-  <button class="btn" id="unfoldBtn" type="button">Unfold now</button>
-  <p class="help"><b>Drag</b> a bead to pull the chain. <b>Tap</b> open space to stir the solvent. <b>Double-tap</b> to unfold. <b>Long-press</b> anywhere to open this panel.</p>
+  <div class="btns">
+    <button class="btn" id="unfoldBtn" type="button">Heat to unfold</button>
+    <button class="btn alt" id="resetBtn" type="button">New chain</button>
+  </div>
+  <div class="key" aria-label="Colour key">
+    <span><i style="background:var(--hydro)"></i>Hydrophobic</span>
+    <span><i style="background:var(--polar)"></i>Polar</span>
+    <span><i style="background:var(--pos)"></i>Positive</span>
+    <span><i style="background:var(--neg)"></i>Negative</span>
+    <span><i style="background:var(--sulfur)"></i>Cysteine</span>
+    <span><i style="background:var(--special)"></i>Gly / Pro</span>
+    <span><i style="background:var(--helix);border-radius:2px"></i>Helix</span>
+    <span><i style="background:var(--strand);border-radius:2px"></i>Strand</span>
+  </div>
+  <p class="help"><b>Drag</b> a residue to pull it. <b>Drag</b> open space to turn the molecule. <b>Tap</b> to stir. <b>Double-tap</b> to heat and unfold. <b>Long-press</b> opens this panel.</p>
 </form>
+
+<script id="engine">
+// Residue-level protein physics for the Hydrophobic Collapse wallpaper.
+// One bead per amino acid (its Cα atom). Units: Å, kcal/mol, K. Runs in the browser or in Node.
+(function (root) {
+'use strict';
+
+const KB = 0.0019872;      // Boltzmann constant, kcal/(mol·K)
+const COULOMB = 332.06;    // kcal·Å/(mol·e²)
+const EPS_WATER = 80;
+const DEG = Math.PI / 180;
+
+// radius (Å), Kyte–Doolittle hydropathy, Chou–Fasman helix and strand propensity
+const AA = {
+  A: [2.5,  1.8, 1.42, 0.83], R: [3.2, -4.5, 0.98, 0.93], N: [2.7, -3.5, 0.67, 0.89],
+  D: [2.7, -3.5, 1.01, 0.54], C: [2.6,  2.5, 0.70, 1.19], Q: [2.9, -3.5, 1.11, 1.10],
+  E: [2.9, -3.5, 1.51, 0.37], G: [2.2, -0.4, 0.57, 0.75], H: [3.0, -3.2, 1.00, 0.87],
+  I: [3.0,  4.5, 1.08, 1.60], L: [3.0,  3.8, 1.21, 1.30], K: [3.1, -3.9, 1.16, 0.74],
+  M: [3.0,  1.9, 1.45, 1.05], F: [3.2,  2.8, 1.13, 1.38], P: [2.7, -1.6, 0.57, 0.55],
+  S: [2.5, -0.8, 0.77, 0.75], T: [2.7, -0.7, 0.83, 1.19], W: [3.5, -0.9, 1.08, 1.37],
+  Y: [3.3, -1.3, 0.69, 1.47], V: [2.8,  4.2, 1.06, 1.70],
+};
+// Model-compound pKa values. Acids go 0 → −1 on deprotonation, bases go +1 → 0.
+const SITE_TYPES = {
+  D: { pKa: 3.9, acid: true, name: 'Asp' },  E: { pKa: 4.2, acid: true, name: 'Glu' },
+  C: { pKa: 8.3, acid: true, name: 'Cys' },  Y: { pKa: 10.1, acid: true, name: 'Tyr' },
+  H: { pKa: 6.0, acid: false, name: 'His' }, K: { pKa: 10.5, acid: false, name: 'Lys' },
+  R: { pKa: 12.5, acid: false, name: 'Arg' },
+};
+const THREE = { A: 'Ala', R: 'Arg', N: 'Asn', D: 'Asp', C: 'Cys', Q: 'Gln', E: 'Glu', G: 'Gly', H: 'His', I: 'Ile',
+  L: 'Leu', K: 'Lys', M: 'Met', F: 'Phe', P: 'Pro', S: 'Ser', T: 'Thr', W: 'Trp', Y: 'Tyr', V: 'Val' };
+
+// Force-field constants
+const DT = 0.015;
+const GAMMA = 0.5;
+const K_BOND = 60, R_BOND = 3.8;
+const K_ANGLE_WALL = 30, THETA_MIN = 82 * DEG, THETA_MAX = 150 * DEG;
+const A_HELIX_ANGLE = 1.2, THETA_HELIX = 91 * DEG, W_THETA_H = 10 * DEG;
+const A_STRAND_ANGLE = 0.7, THETA_STRAND = 120 * DEG, W_THETA_S = 12 * DEG;
+const D_HELIX = 2.0, PHI_HELIX = 50 * DEG, W_PHI_H = 22 * DEG;
+const D_STRAND = 0.9, PHI_STRAND = -170 * DEG, W_PHI_S = 28 * DEG;
+const H_BOND = 1.8, R_HB = 6.2, W_HB = 0.6;   // i→i+4 helical hydrogen bond (Cα–Cα distance)
+const EPS_MIN = 0.10, EPS_SCALE = 1.35;        // contact well depths from hydropathy
+const LJ_CUT = 1.8;
+const SIG_I3 = 4.2;
+const K_SS = 20, R_SS = 5.5;                   // disulfide as a Cα–Cα spring
+const SS_REACT = 6.5;                          // Cα–Cα distance at which thiols can react
+const SS_MIN_SEP = 6;                          // shorter disulfide loops are too strained
+const FMAX = 200;
+const MC_EVERY = 25;
+
+function hp01(h) { return (h + 4.5) / 9; }
+function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+function propWeight(p) { return clamp(0.3 + (p - 1) * 2, 0.05, 1.3); }
+function wrap(a) { while (a > Math.PI) a -= 2 * Math.PI; while (a < -Math.PI) a += 2 * Math.PI; return a; }
+
+function createEngine() {
+  const e = {
+    params: { T: 300, pH: 7, saltMM: 150, redox: 0.4 },
+    N: 0, seq: '', name: '', native: [],
+    x: null, y: null, z: null, charge: null, partner: null, ss: null, contact: null,
+    events: [], flashes: [], time: 0, stepCount: 0,
+    stats: {},
+    grab: -1, target: [0, 0, 0],
+  };
+  let vx, vy, vz, fx, fy, fz, rad, sig, eps, wAngH, wAngS, wDihH, wDihS, wHB;
+  let sites = [], charged = [], rBox = 40;
+
+  e.load = function (protein) {
+    const seq = protein.seq, N = seq.length;
+    e.seq = seq; e.N = N; e.name = protein.name; e.native = protein.native || [];
+    e.x = new Float64Array(N); e.y = new Float64Array(N); e.z = new Float64Array(N);
+    vx = new Float64Array(N); vy = new Float64Array(N); vz = new Float64Array(N);
+    fx = new Float64Array(N); fy = new Float64Array(N); fz = new Float64Array(N);
+    rad = new Float64Array(N);
+    e.charge = new Float64Array(N);
+    e.partner = new Int16Array(N).fill(-1);
+    e.ss = new Uint8Array(N);          // 0 coil, 1 helix, 2 strand
+    e.contact = new Uint8Array(N * N);
+    sig = new Float64Array(N * N); eps = new Float64Array(N * N);
+    for (let i = 0; i < N; i++) rad[i] = AA[seq[i]][0];
+    for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) {
+      sig[i * N + j] = 0.9 * (rad[i] + rad[j]);
+      eps[i * N + j] = EPS_MIN + EPS_SCALE * hp01(AA[seq[i]][1]) * hp01(AA[seq[j]][1]);
+    }
+    const avg = (i, n, k) => { let s = 0; for (let m = 0; m < n; m++) s += AA[seq[i + m]][k]; return s / n; };
+    wAngH = new Float64Array(N); wAngS = new Float64Array(N);
+    wDihH = new Float64Array(N); wDihS = new Float64Array(N); wHB = new Float64Array(N);
+    for (let i = 0; i < N - 2; i++) { wAngH[i] = propWeight(avg(i, 3, 2)); wAngS[i] = propWeight(avg(i, 3, 3)); }
+    for (let i = 0; i < N - 3; i++) { wDihH[i] = propWeight(avg(i, 4, 2)); wDihS[i] = propWeight(avg(i, 4, 3)); }
+    for (let i = 0; i < N - 4; i++) wHB[i] = propWeight(avg(i, 5, 2));
+    // Proline cannot donate a backbone hydrogen bond and breaks helices
+    for (let i = 0; i < N; i++) if (seq[i] === 'P') {
+      for (let k = Math.max(0, i - 4); k <= i; k++) wHB[k] *= 0.2;
+      for (let k = Math.max(0, i - 3); k <= i; k++) wDihH[k] *= 0.4;
+    }
+    // Titratable sites, including the chain termini
+    sites = [];
+    const addSite = (res, t, label) => sites.push({ res, pKa: t.pKa, acid: t.acid, prot: true, active: true, label });
+    addSite(0, { pKa: 8.0, acid: false }, 'N-terminus');
+    for (let i = 0; i < N; i++) if (SITE_TYPES[seq[i]]) addSite(i, SITE_TYPES[seq[i]], THREE[seq[i]] + (i + 1));
+    addSite(N - 1, { pKa: 3.1, acid: true }, 'C-terminus');
+    const kT = KB * e.params.T;
+    for (const s of sites) s.prot = Math.random() < 1 / (1 + Math.pow(10, e.params.pH - s.pKa));
+    rBox = 5 * Math.pow(N, 0.5) + 10;
+    e.events = []; e.flashes = []; e.time = 0; e.stepCount = 0;
+    e.grab = -1;
+    e.unfoldCoords();
+    updateCharges();
+    e.measure();
+    void kT;
+  };
+
+  // Extended random coil with sensible bond angles
+  e.unfoldCoords = function () {
+    const N = e.N;
+    let dx = 1, dy = 0, dz = 0;
+    e.x[0] = e.y[0] = e.z[0] = 0;
+    for (let i = 1; i < N; i++) {
+      let nx, ny, nz, n;
+      do {
+        nx = dx + (Math.random() - 0.5) * 1.3; ny = dy + (Math.random() - 0.5) * 1.3; nz = dz + (Math.random() - 0.5) * 1.3;
+        n = Math.hypot(nx, ny, nz);
+      } while (n < 0.3);
+      dx = nx / n; dy = ny / n; dz = nz / n;
+      e.x[i] = e.x[i - 1] + R_BOND * dx; e.y[i] = e.y[i - 1] + R_BOND * dy; e.z[i] = e.z[i - 1] + R_BOND * dz;
+    }
+    center();
+    vx.fill(0); vy.fill(0); vz.fill(0);
+    for (let i = 0; i < N; i++) e.partner[i] = -1;
+    for (const s of sites) s.active = true;
+  };
+
+  function center() {
+    let cx = 0, cy = 0, cz = 0;
+    for (let i = 0; i < e.N; i++) { cx += e.x[i]; cy += e.y[i]; cz += e.z[i]; }
+    cx /= e.N; cy /= e.N; cz /= e.N;
+    for (let i = 0; i < e.N; i++) { e.x[i] -= cx; e.y[i] -= cy; e.z[i] -= cz; }
+  }
+
+  function siteCharge(s) {
+    if (!s.active) return 0;
+    return s.acid ? (s.prot ? 0 : -1) : (s.prot ? 1 : 0);
+  }
+  function updateCharges() {
+    e.charge.fill(0);
+    for (const s of sites) e.charge[s.res] += siteCharge(s);
+    charged = [];
+    for (let i = 0; i < e.N; i++) if (e.charge[i] !== 0) charged.push(i);
+  }
+  const debye = () => 3.04 / Math.sqrt(Math.max(e.params.saltMM, 1) / 1000);
+
+  // ---- Forces. With measure=true also returns the potential energy and fills stats. ----
+  e.forces = function (measure) {
+    const N = e.N, x = e.x, y = e.y, z = e.z;
+    fx.fill(0); fy.fill(0); fz.fill(0);
+    let E = 0, eBond = 0, eLocal = 0, eContact = 0, eElec = 0;
+    if (measure) e.contact.fill(0);
+
+    // Bonds
+    for (let i = 0; i < N - 1; i++) {
+      const dx = x[i + 1] - x[i], dy = y[i + 1] - y[i], dz = z[i + 1] - z[i];
+      const r = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1e-6;
+      let f = K_BOND * (r - R_BOND) / r;
+      if (Math.abs(f * r) > FMAX) f = Math.sign(f) * FMAX / r;
+      fx[i] += f * dx; fy[i] += f * dy; fz[i] += f * dz;
+      fx[i + 1] -= f * dx; fy[i + 1] -= f * dy; fz[i + 1] -= f * dz;
+      if (measure) eBond += 0.5 * K_BOND * (r - R_BOND) ** 2;
+    }
+
+    // Virtual bond angles: walls plus helix (91°) and strand (120°) wells
+    for (let i = 0; i < N - 2; i++) {
+      const j = i + 1, k = i + 2;
+      const ax = x[i] - x[j], ay = y[i] - y[j], az = z[i] - z[j];
+      const bx = x[k] - x[j], by = y[k] - y[j], bz = z[k] - z[j];
+      const la = Math.sqrt(ax * ax + ay * ay + az * az) || 1e-6, lb = Math.sqrt(bx * bx + by * by + bz * bz) || 1e-6;
+      let c = (ax * bx + ay * by + az * bz) / (la * lb);
+      c = clamp(c, -0.9999, 0.9999);
+      const th = Math.acos(c), s = Math.sqrt(1 - c * c);
+      let U = 0, dU = 0;
+      if (th < THETA_MIN) { U += K_ANGLE_WALL * (THETA_MIN - th) ** 2; dU += -2 * K_ANGLE_WALL * (THETA_MIN - th); }
+      if (th > THETA_MAX) { U += K_ANGLE_WALL * (th - THETA_MAX) ** 2; dU += 2 * K_ANGLE_WALL * (th - THETA_MAX); }
+      const gh = Math.exp(-((th - THETA_HELIX) ** 2) / (2 * W_THETA_H ** 2)) * A_HELIX_ANGLE * wAngH[i];
+      const gs = Math.exp(-((th - THETA_STRAND) ** 2) / (2 * W_THETA_S ** 2)) * A_STRAND_ANGLE * wAngS[i];
+      U -= gh + gs;
+      dU += gh * (th - THETA_HELIX) / (W_THETA_H ** 2) + gs * (th - THETA_STRAND) / (W_THETA_S ** 2);
+      const g = dU / s; // F = (dU/dθ / sinθ) · dcos/dr
+      const inv = 1 / (la * lb);
+      const fax = g * (bx * inv - c * ax / (la * la)), fay = g * (by * inv - c * ay / (la * la)), faz = g * (bz * inv - c * az / (la * la));
+      const fkx = g * (ax * inv - c * bx / (lb * lb)), fky = g * (ay * inv - c * by / (lb * lb)), fkz = g * (az * inv - c * bz / (lb * lb));
+      fx[i] += fax; fy[i] += fay; fz[i] += faz;
+      fx[k] += fkx; fy[k] += fky; fz[k] += fkz;
+      fx[j] -= fax + fkx; fy[j] -= fay + fky; fz[j] -= faz + fkz;
+      if (measure) eLocal += U;
+    }
+
+    // Virtual dihedrals: right-handed helix (+50°) and extended strand (−170°) wells
+    for (let i = 0; i < N - 3; i++) {
+      const i1 = i + 1, i2 = i + 2, i3 = i + 3;
+      const b1x = x[i1] - x[i], b1y = y[i1] - y[i], b1z = z[i1] - z[i];
+      const b2x = x[i2] - x[i1], b2y = y[i2] - y[i1], b2z = z[i2] - z[i1];
+      const b3x = x[i3] - x[i2], b3y = y[i3] - y[i2], b3z = z[i3] - z[i2];
+      const n1x = b1y * b2z - b1z * b2y, n1y = b1z * b2x - b1x * b2z, n1z = b1x * b2y - b1y * b2x;
+      const n2x = b2y * b3z - b2z * b3y, n2y = b2z * b3x - b2x * b3z, n2z = b2x * b3y - b2y * b3x;
+      const n1sq = n1x * n1x + n1y * n1y + n1z * n1z, n2sq = n2x * n2x + n2y * n2y + n2z * n2z;
+      if (n1sq < 1e-6 || n2sq < 1e-6) continue;
+      const lb2 = Math.sqrt(b2x * b2x + b2y * b2y + b2z * b2z);
+      const phi = Math.atan2(lb2 * (b1x * n2x + b1y * n2y + b1z * n2z), n1x * n2x + n1y * n2y + n1z * n2z);
+      const dh = wrap(phi - PHI_HELIX), ds = wrap(phi - PHI_STRAND);
+      const gh = D_HELIX * wDihH[i] * Math.exp(-(dh * dh) / (2 * W_PHI_H ** 2));
+      const gs = D_STRAND * wDihS[i] * Math.exp(-(ds * ds) / (2 * W_PHI_S ** 2));
+      const dU = gh * dh / (W_PHI_H ** 2) + gs * ds / (W_PHI_S ** 2);
+      // dφ/dr for the four points (Bekker / Blondel–Karplus)
+      const a0 = -lb2 / n1sq, a3 = lb2 / n2sq;
+      const g0x = a0 * n1x, g0y = a0 * n1y, g0z = a0 * n1z;
+      const g3x = a3 * n2x, g3y = a3 * n2y, g3z = a3 * n2z;
+      const p = (b1x * b2x + b1y * b2y + b1z * b2z) / (lb2 * lb2);
+      const q = (b3x * b2x + b3y * b2y + b3z * b2z) / (lb2 * lb2);
+      const g1x = (-p - 1) * g0x + q * g3x, g1y = (-p - 1) * g0y + q * g3y, g1z = (-p - 1) * g0z + q * g3z;
+      const g2x = (-q - 1) * g3x + p * g0x, g2y = (-q - 1) * g3y + p * g0y, g2z = (-q - 1) * g3z + p * g0z;
+      fx[i] -= dU * g0x; fy[i] -= dU * g0y; fz[i] -= dU * g0z;
+      fx[i1] -= dU * g1x; fy[i1] -= dU * g1y; fz[i1] -= dU * g1z;
+      fx[i2] -= dU * g2x; fy[i2] -= dU * g2y; fz[i2] -= dU * g2z;
+      fx[i3] -= dU * g3x; fy[i3] -= dU * g3y; fz[i3] -= dU * g3z;
+      if (measure) eLocal -= gh + gs;
+    }
+
+    // Helical i→i+4 hydrogen bond
+    for (let i = 0; i < N - 4; i++) {
+      const j = i + 4;
+      const dx = x[i] - x[j], dy = y[i] - y[j], dz = z[i] - z[j];
+      const r = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1e-6;
+      const d = r - R_HB;
+      if (Math.abs(d) > 4 * W_HB) continue;
+      const g = H_BOND * wHB[i] * Math.exp(-(d * d) / (2 * W_HB * W_HB));
+      const f = -(g * d / (W_HB * W_HB)) / r; // −dU/dr / r, pulls toward R_HB
+      fx[i] += f * dx; fy[i] += f * dy; fz[i] += f * dz;
+      fx[j] -= f * dx; fy[j] -= f * dy; fz[j] -= f * dz;
+      if (measure) eLocal -= g;
+    }
+
+    // Contacts: residue-specific Lennard-Jones (minimum at σ, depth ε)
+    for (let i = 0; i < N - 3; i++) {
+      const xi = x[i], yi = y[i], zi = z[i];
+      for (let j = i + 3; j < N; j++) {
+        const dx = xi - x[j], dy = yi - y[j], dz = zi - z[j];
+        let r2 = dx * dx + dy * dy + dz * dz;
+        let s, ep, cut2, attractive;
+        if (j === i + 3) { s = SIG_I3; ep = 0.5; attractive = false; cut2 = s * s; }
+        else { s = sig[i * N + j]; ep = eps[i * N + j]; attractive = true; cut2 = (LJ_CUT * s) ** 2; }
+        if (r2 >= cut2) continue;
+        if (r2 < 1) r2 = 1;
+        const s2 = s * s / r2, s6 = s2 * s2 * s2;
+        let f = 12 * ep * (s6 * s6 - s6) / r2;
+        const r = Math.sqrt(r2);
+        if (Math.abs(f * r) > FMAX) f = Math.sign(f) * FMAX / r;
+        fx[i] += f * dx; fy[i] += f * dy; fz[i] += f * dz;
+        fx[j] -= f * dx; fy[j] -= f * dy; fz[j] -= f * dz;
+        if (measure) {
+          if (attractive) {
+            const sc = 1 / (LJ_CUT ** 6);
+            eContact += ep * (s6 * s6 - 2 * s6) - ep * (sc * sc - 2 * sc);
+            if (r2 < (1.25 * s) ** 2) e.contact[i * N + j] = 1;
+          } else {
+            eContact += ep * (s6 * s6 - 2 * s6 + 1);
+          }
+        }
+      }
+    }
+
+    // Screened electrostatics (Debye–Hückel) between charged residues
+    const lam = debye(), ecut = Math.min(3 * lam, 30), ecut2 = ecut * ecut;
+    for (let a = 0; a < charged.length; a++) {
+      const i = charged[a], qi = e.charge[i];
+      for (let b = a + 1; b < charged.length; b++) {
+        const j = charged[b];
+        if (j - i < 2) continue;
+        const dx = x[i] - x[j], dy = y[i] - y[j], dz = z[i] - z[j];
+        let r2 = dx * dx + dy * dy + dz * dz;
+        if (r2 > ecut2) continue;
+        if (r2 < 9) r2 = 9;
+        const r = Math.sqrt(r2);
+        const U = COULOMB * qi * e.charge[j] * Math.exp(-r / lam) / (EPS_WATER * r);
+        const f = U * (1 / r + 1 / lam) / r;
+        fx[i] += f * dx; fy[i] += f * dy; fz[i] += f * dz;
+        fx[j] -= f * dx; fy[j] -= f * dy; fz[j] -= f * dz;
+        if (measure) eElec += U;
+      }
+    }
+
+    // Disulfide bonds
+    let eSS = 0;
+    for (let i = 0; i < N; i++) {
+      const j = e.partner[i];
+      if (j <= i) continue;
+      const dx = x[j] - x[i], dy = y[j] - y[i], dz = z[j] - z[i];
+      const r = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1e-6;
+      let f = K_SS * (r - R_SS) / r;
+      if (Math.abs(f * r) > FMAX) f = Math.sign(f) * FMAX / r;
+      fx[i] += f * dx; fy[i] += f * dy; fz[i] += f * dz;
+      fx[j] -= f * dx; fy[j] -= f * dy; fz[j] -= f * dz;
+      if (measure) eSS += 0.5 * K_SS * (r - R_SS) ** 2;
+    }
+
+    // Confinement sphere and a gentle pull back to the origin
+    let cx = 0, cy = 0, cz = 0;
+    for (let i = 0; i < N; i++) { cx += x[i]; cy += y[i]; cz += z[i]; }
+    cx /= N; cy /= N; cz /= N;
+    let eBox = 0;
+    for (let i = 0; i < N; i++) {
+      fx[i] -= 0.01 * cx; fy[i] -= 0.01 * cy; fz[i] -= 0.01 * cz;
+      const r = Math.sqrt(x[i] * x[i] + y[i] * y[i] + z[i] * z[i]);
+      if (r > rBox) {
+        const f = -5 * (r - rBox) / r;
+        fx[i] += f * x[i]; fy[i] += f * y[i]; fz[i] += f * z[i];
+        if (measure) eBox += 2.5 * (r - rBox) ** 2;
+      }
+    }
+    if (measure) eBox += 0.005 * N * (cx * cx + cy * cy + cz * cz);
+
+    // A finger pulling one residue
+    if (e.grab >= 0) {
+      const g = e.grab;
+      let px = 4 * (e.target[0] - x[g]), py = 4 * (e.target[1] - y[g]), pz = 4 * (e.target[2] - z[g]);
+      const m = Math.hypot(px, py, pz);
+      if (m > FMAX) { px *= FMAX / m; py *= FMAX / m; pz *= FMAX / m; }
+      fx[g] += px; fy[g] += py; fz[g] += pz;
+    }
+
+    if (measure) {
+      E = eBond + eLocal + eContact + eElec + eSS + eBox;
+      e.stats.energy = eLocal + eContact + eElec;
+      e.stats.eElec = eElec;
+      e.stats.total = E;
+    }
+    return E;
+  };
+
+  // ---- Chemistry: constant-pH titration and thiol–disulfide reactions (Monte Carlo) ----
+  function elecAt(i, dq) {
+    // Energy change if residue i's charge changes by dq
+    const lam = debye();
+    let s = 0;
+    for (const j of charged) {
+      if (j === i || Math.abs(j - i) < 2) continue;
+      const r = Math.max(3, Math.hypot(e.x[i] - e.x[j], e.y[i] - e.y[j], e.z[i] - e.z[j]));
+      s += e.charge[j] * Math.exp(-r / lam) / r;
+    }
+    return COULOMB * dq * s / EPS_WATER;
+  }
+  const dist = (i, j) => Math.hypot(e.x[i] - e.x[j], e.y[i] - e.y[j], e.z[i] - e.z[j]);
+  const siteOf = (res, acidOnly) => sites.find(s => s.res === res && s.label.startsWith('Cys') === acidOnly);
+  const thiolate = (i) => { const s = siteOf(i, true); return s && s.active && !s.prot; };
+  const isNative = (i, j) => e.native.some(([a, b]) => (a - 1 === i && b - 1 === j) || (a - 1 === j && b - 1 === i));
+  function log(kind, text) {
+    e.events.unshift({ t: e.time, kind, text });
+    if (e.events.length > 20) e.events.pop();
+  }
+  function bond(i, j) {
+    e.partner[i] = j; e.partner[j] = i;
+    siteOf(i, true).active = false; siteOf(j, true).active = false;
+  }
+  function unbond(i, j, jThiolate) {
+    e.partner[i] = -1; e.partner[j] = -1;
+    const si = siteOf(i, true), sj = siteOf(j, true);
+    si.active = true; si.prot = true;
+    sj.active = true; sj.prot = !jThiolate;
+  }
+
+  function chemistry() {
+    const kT = KB * e.params.T, ln10 = Math.LN10;
+    // Titration: Metropolis on ΔG = kT·ln10·(pKa − pH) + ΔE_elec for deprotonation
+    for (const s of sites) {
+      if (!s.active) continue;
+      const toDeprot = s.prot;
+      const dq = s.acid ? (toDeprot ? -1 : 1) : (toDeprot ? -1 : 1);
+      let dG = kT * ln10 * (s.pKa - e.params.pH) + elecAt(s.res, dq);
+      if (!toDeprot) dG = -kT * ln10 * (s.pKa - e.params.pH) + elecAt(s.res, dq);
+      if (dG <= 0 || Math.random() < Math.exp(-dG / kT)) {
+        s.prot = !s.prot;
+        e.charge[s.res] += dq;
+        e.flashes.push({ res: s.res, t: e.time, kind: toDeprot ? 'lost' : 'gained' });
+      }
+    }
+    // Disulfides: oxidation needs a thiolate; reduction by the redox buffer; shuffling by thiolate attack
+    const ox = (1 + e.params.redox) / 2, red = (1 - e.params.redox) / 2;
+    const cys = [];
+    for (let i = 0; i < e.N; i++) if (e.seq[i] === 'C') cys.push(i);
+    for (let a = 0; a < cys.length; a++) {
+      const i = cys[a];
+      if (e.partner[i] >= 0) {
+        const j = e.partner[i];
+        if (j > i && Math.random() < 0.0015 * red) {
+          unbond(i, j, false);
+          log('ss-break', `Cys${i + 1}–Cys${j + 1} disulfide reduced`);
+          e.flashes.push({ res: i, t: e.time, kind: 'ss' }, { res: j, t: e.time, kind: 'ss' });
+        }
+        continue;
+      }
+      for (let b = a + 1; b < cys.length; b++) {
+        const j = cys[b];
+        if (e.partner[j] >= 0 || j - i < SS_MIN_SEP) continue;
+        if (!(thiolate(i) || thiolate(j))) continue;
+        if (dist(i, j) < SS_REACT && Math.random() < 0.05 * ox) {
+          bond(i, j);
+          log('ss-form', `Cys${i + 1}–Cys${j + 1} disulfide formed${isNative(i, j) ? ' · native' : ''}`);
+          e.flashes.push({ res: i, t: e.time, kind: 'ss' }, { res: j, t: e.time, kind: 'ss' });
+          break;
+        }
+      }
+    }
+    // Shuffling: free thiolate k attacks disulfide i–j, forming k–i and releasing j as a thiolate
+    for (const k of cys) {
+      if (e.partner[k] >= 0 || !thiolate(k)) continue;
+      for (const i of cys) {
+        const j = e.partner[i];
+        if (j < 0 || i === k || j === k || Math.abs(k - i) < SS_MIN_SEP) continue;
+        if (dist(k, i) < SS_REACT && Math.random() < 0.008) {
+          unbond(i, j, true);
+          bond(k, i);
+          log('ss-shuffle', `Cys${k + 1} attacked Cys${i + 1}–Cys${j + 1} → Cys${Math.min(k, i) + 1}–Cys${Math.max(k, i) + 1}${isNative(k, i) ? ' · native' : ''}`);
+          e.flashes.push({ res: k, t: e.time, kind: 'ss' }, { res: j, t: e.time, kind: 'ss' });
+          break;
+        }
+      }
+    }
+    updateCharges();
+    const cutoff = e.time - 1.2;
+    e.flashes = e.flashes.filter(f => f.t > cutoff);
+  }
+
+  // ---- Integration (Langevin dynamics) ----
+  function gauss() {
+    let u = 0;
+    while (u === 0) u = Math.random();
+    return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * Math.random());
+  }
+  e.step = function (n, measureLast) {
+    const N = e.N;
+    const c1 = Math.exp(-GAMMA * DT), c2 = Math.sqrt((1 - c1 * c1) * KB * e.params.T);
+    for (let s = 0; s < n; s++) {
+      e.forces(measureLast && s === n - 1);
+      for (let i = 0; i < N; i++) {
+        vx[i] = (vx[i] + fx[i] * DT) * c1 + c2 * gauss();
+        vy[i] = (vy[i] + fy[i] * DT) * c1 + c2 * gauss();
+        vz[i] = (vz[i] + fz[i] * DT) * c1 + c2 * gauss();
+        e.x[i] += vx[i] * DT; e.y[i] += vy[i] * DT; e.z[i] += vz[i] * DT;
+      }
+      e.stepCount++;
+      if (e.stepCount % MC_EVERY === 0) chemistry();
+    }
+  };
+  e.advanceClock = function (dt) { e.time += dt; };
+
+  // ---- Observables ----
+  e.measure = function () {
+    const N = e.N, x = e.x, y = e.y, z = e.z;
+    e.forces(true);
+    let cx = 0, cy = 0, cz = 0;
+    for (let i = 0; i < N; i++) { cx += x[i]; cy += y[i]; cz += z[i]; }
+    cx /= N; cy /= N; cz /= N;
+    let s2 = 0;
+    for (let i = 0; i < N; i++) s2 += (x[i] - cx) ** 2 + (y[i] - cy) ** 2 + (z[i] - cz) ** 2;
+    e.stats.rg = Math.sqrt(s2 / N);
+    e.stats.center = [cx, cy, cz];
+    // Secondary structure from Cα geometry: two consecutive helical (or extended) dihedrals
+    const dihs = new Float64Array(N), angs = new Float64Array(N);
+    for (let i = 0; i < N - 2; i++) angs[i] = angleAt(i);
+    for (let i = 0; i < N - 3; i++) dihs[i] = dihedral(i);
+    e.ss.fill(0);
+    const helical = (i) => Math.abs(wrap(dihs[i] - PHI_HELIX)) < 35 * DEG && angs[i] < 105 * DEG && angs[i + 1] < 105 * DEG;
+    const extended = (i) => Math.abs(wrap(dihs[i] - PHI_STRAND)) < 45 * DEG && angs[i] > 105 * DEG && angs[i + 1] > 105 * DEG;
+    for (let i = 0; i < N - 4; i++) {
+      if (helical(i) && helical(i + 1)) for (let k = i; k <= i + 4; k++) e.ss[k] = 1;
+    }
+    for (let i = 0; i < N - 4; i++) {
+      if (extended(i) && extended(i + 1)) for (let k = i; k <= i + 4; k++) if (!e.ss[k]) e.ss[k] = 2;
+    }
+    let h = 0, st = 0;
+    for (let i = 0; i < N; i++) { if (e.ss[i] === 1) h++; else if (e.ss[i] === 2) st++; }
+    e.stats.helix = h / N; e.stats.strand = st / N;
+    // Salt bridges, net charge, contacts, disulfides
+    const bridges = [];
+    for (let a = 0; a < charged.length; a++) for (let b = a + 1; b < charged.length; b++) {
+      const i = charged[a], j = charged[b];
+      if (j - i >= 3 && e.charge[i] * e.charge[j] < 0 && dist(i, j) < 7.5) bridges.push([i, j]);
+    }
+    e.stats.bridges = bridges;
+    let q = 0;
+    for (let i = 0; i < N; i++) q += e.charge[i];
+    e.stats.netCharge = q;
+    let nc = 0;
+    for (let k = 0; k < N * N; k++) nc += e.contact[k];
+    e.stats.contacts = nc;
+    const ss = [];
+    for (let i = 0; i < N; i++) if (e.partner[i] > i) ss.push([i, e.partner[i], isNative(i, e.partner[i])]);
+    e.stats.disulfides = ss;
+    e.stats.debye = debye();
+    return e.stats;
+  };
+  function angleAt(i) {
+    const x = e.x, y = e.y, z = e.z, j = i + 1, k = i + 2;
+    const ax = x[i] - x[j], ay = y[i] - y[j], az = z[i] - z[j], bx = x[k] - x[j], by = y[k] - y[j], bz = z[k] - z[j];
+    return Math.acos(clamp((ax * bx + ay * by + az * bz) / (Math.hypot(ax, ay, az) * Math.hypot(bx, by, bz)), -1, 1));
+  }
+  function dihedral(i) {
+    const x = e.x, y = e.y, z = e.z;
+    const b1 = [x[i + 1] - x[i], y[i + 1] - y[i], z[i + 1] - z[i]];
+    const b2 = [x[i + 2] - x[i + 1], y[i + 2] - y[i + 1], z[i + 2] - z[i + 1]];
+    const b3 = [x[i + 3] - x[i + 2], y[i + 3] - y[i + 2], z[i + 3] - z[i + 2]];
+    const cr = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+    const dt = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    const n1 = cr(b1, b2), n2 = cr(b2, b3);
+    return Math.atan2(Math.sqrt(dt(b2, b2)) * dt(b1, n2), dt(n1, n2));
+  }
+
+  // ---- Interaction helpers ----
+  e.kick = function (px, py, pz, radius, strength) {
+    for (let i = 0; i < e.N; i++) {
+      const dx = e.x[i] - px, dy = e.y[i] - py, dz = e.z[i] - pz, d = Math.hypot(dx, dy, dz);
+      if (d < radius && d > 0.1) {
+        const k = strength * (1 - d / radius) / d;
+        vx[i] += dx * k; vy[i] += dy * k; vz[i] += dz * k;
+      }
+    }
+  };
+  e.denature = function () {
+    // Heat alone unfolds it; disulfides stay unless the redox buffer reduces them
+    for (let i = 0; i < e.N; i++) {
+      const s = Math.sqrt(KB * 600);
+      vx[i] += gauss() * s; vy[i] += gauss() * s; vz[i] += gauss() * s;
+    }
+  };
+  e.residueInfo = function (i) {
+    const s = sites.filter(t => t.res === i && t.active);
+    return { name: THREE[e.seq[i]] + (i + 1), sites: s.map(t => ({ label: t.label, prot: t.prot })) };
+  };
+  e.forcesArrays = () => [fx, fy, fz];
+  e.radius = (i) => rad[i];
+  e.sitesList = () => sites;
+  return e;
+}
+
+const api = { createEngine, AA, THREE };
+if (typeof module !== 'undefined' && module.exports) module.exports = api;
+else root.ProteinEngine = api;
+})(typeof window !== 'undefined' ? window : globalThis);
+
+</script>
 
 <script>
 (() => {
 'use strict';
+const { createEngine } = window.ProteinEngine;
 
-// ---------- Sequences ----------
-// 2D HP-model benchmark sequences (Unger & Moult set), H = hydrophobic, P = polar.
-const SEQUENCES = [
-  { id: 'b20', name: 'Benchmark 20-mer', seq: 'HPHPPHHPHPPHPHHPPHPH' },
-  { id: 'b24', name: 'Benchmark 24-mer', seq: 'HHPPHPPHPPHPPHPPHPPHPPHH' },
-  { id: 'b36', name: 'Benchmark 36-mer', seq: 'PPPHHPPHHPPPPPHHHHHHHPPHHPPPPHHPPHPP' },
-  { id: 'b48', name: 'Benchmark 48-mer', seq: 'PPHPPHHPPHHPPPPPHHHHHHHHHHPPPPPPHHPPHHPPHPPHHHHH' },
-  { id: 'b50', name: 'Benchmark 50-mer', seq: 'HHPHPHPHPHHHHPHPPPHPPPHPPPPHPPPHPPPHPHHHHPHPHPHPHH' },
-  { id: 'b64', name: 'Benchmark 64-mer', seq: 'HHHHHHHHHHHHPHPHPPHHPPHHPPHPPHHPPHHPPHPPHHPPHHPPHPHPHHHHHHHHHHHH' },
-  { id: 'rnd', name: 'Random 40-mer', seq: null },
+// ---------- Proteins ----------
+const PROTEINS = [
+  { id: 'bpti', name: 'BPTI', seq: 'RPDFCLEPPYTGPCKARIIRYFYNAKAGLCQTFVYGGCRAKRNNFKSAEDCMRTCGGA', native: [[5, 55], [14, 38], [30, 51]],
+    note: 'Bovine pancreatic trypsin inhibitor. Six cysteines; the native fold pairs 5–55, 14–38 and 30–51.' },
+  { id: 'villin', name: 'Villin headpiece HP35', seq: 'LSDEDFKAVFGMTRSAFANLPLWKQQNLKKEKGLF',
+    note: 'A fast-folding three-helix bundle, a favourite of folding simulations.' },
+  { id: 'trpcage', name: 'Trp-cage TC5b', seq: 'NLYIQWLKDGGPSSGRPPPS',
+    note: 'A 20-residue designed miniprotein: a short helix packed around a tryptophan.' },
+  { id: 'gb1', name: 'GB1 hairpin', seq: 'GEWTYDDATKTFTVTE',
+    note: 'Residues 41–56 of protein G: a β-hairpin that folds on its own.' },
+  { id: 'abeta', name: 'Amyloid-β 1–42', seq: 'DAEFRHDSGYEVHHQKLVFFAEDVGSNKGAIIGLMVGGVVIA',
+    note: 'The Alzheimer’s peptide. Mostly disordered, with a very hydrophobic C-terminal tail.' },
+  { id: 'ubq', name: 'Ubiquitin', seq: 'MQIFVKTLTGKTITLEVEPSDTIENVKAKIQDKEGIPPDQQRLIFAGKQLEDGRTLSDYNIQKESTLHLVLRLRGG',
+    note: '76 residues, mixed helix and sheet. The heaviest to simulate here.' },
 ];
-function randomSeq(n) {
-  let s = '';
-  for (let i = 0; i < n; i++) s += Math.random() < 0.45 ? 'H' : 'P';
-  return s;
-}
 
 // ---------- Settings ----------
 const reduceMotion = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
-const DEFAULTS = { seq: 'b48', speed: reduceMotion ? 0.5 : 1, cycle: 60, hud: true, saver: false };
-const STORE_KEY = 'hydrophobic-collapse-settings';
+const DEFAULTS = { protein: 'bpti', temp: 300, ph: 7, salt: 150, redox: 0.4, speed: reduceMotion ? 0.5 : 1, cycle: 90, hud: true, saver: false };
+const STORE_KEY = 'hydrophobic-collapse-v2';
 let settings = { ...DEFAULTS };
+let hadSaved = false;
 try {
   const saved = JSON.parse(localStorage.getItem(STORE_KEY) || 'null');
-  if (saved && typeof saved === 'object') settings = { ...DEFAULTS, ...saved };
-} catch (e) { /* storage unavailable: use defaults */ }
-function saveSettings() {
-  try { localStorage.setItem(STORE_KEY, JSON.stringify(settings)); } catch (e) { /* ignore */ }
-}
+  if (saved && typeof saved === 'object') { settings = { ...DEFAULTS, ...saved }; hadSaved = true; }
+} catch (e) { /* storage unavailable */ }
+function save() { try { localStorage.setItem(STORE_KEY, JSON.stringify(settings)); } catch (e) { /* ignore */ } }
 const clean = location.hash === '#clean';
-if (clean) document.body.classList.add('clean');
+if (clean) { document.body.classList.add('clean'); if (!hadSaved) settings.hud = false; }
 
-// ---------- Model constants (reduced Lennard-Jones units) ----------
-const DT = 0.004;          // integration step, τ
-const GAMMA = 0.5;         // solvent friction
-const KB = 400;            // bond spring
-const KANG = 0.5;          // backbone bending stiffness
-const EPS = 1.0;           // H–H well depth ε
-const RC2 = 2.5 * 2.5;     // H–H cutoff²
-const WCA2 = Math.pow(2, 1 / 3); // purely repulsive cutoff² for pairs involving P
-const CONTACT2 = 1.5 * 1.5;
-const FMAX = 400;
-const LJ_SHIFT = 4 * (Math.pow(RC2, -6) - Math.pow(RC2, -3));
-const T_FOLD = 0.50;
-const T_HOT = 2.2;
-
-// ---------- State ----------
-let seqDef, seq, N, isH;
-let x, y, vx, vy, fx, fy, nContacts;
-let contactNow, contactAvg, pairs = [];
-let energy = 0, contactCount = 0, rg = 0, bestE = 0;
-let hist = [];
-let T = T_HOT, phase = 'hot', phaseT = 0;
-let grabbed = -1, target = { x: 0, y: 0 };
-
-const canvas = document.getElementById('sim');
-const ctx = canvas.getContext('2d');
-let W = 0, H = 0, dpr = 1, S = 40; // S = pixels per σ
-
-const css = getComputedStyle(document.documentElement);
-const tok = (n) => css.getPropertyValue(n).trim();
-const COL = {
-  hydro: tok('--hydro'), hydroDim: tok('--hydro-dim'), polar: tok('--polar'),
-  bond: tok('--bond'), ink: tok('--ink'), haze: tok('--haze'),
-};
-const hexRgb = (h) => { const n = parseInt(h.slice(1), 16); return [n >> 16 & 255, n >> 8 & 255, n & 255]; };
-const RGB = { hydro: hexRgb(COL.hydro), polar: hexRgb(COL.polar), ink: hexRgb(COL.ink) };
-
-// Gaussian noise (Box–Muller, one cached value)
-let spare = null;
-function gauss() {
-  if (spare !== null) { const s = spare; spare = null; return s; }
-  let u = 0, v = 0;
-  while (u === 0) u = Math.random();
-  v = Math.random();
-  const m = Math.sqrt(-2 * Math.log(u));
-  spare = m * Math.sin(2 * Math.PI * v);
-  return m * Math.cos(2 * Math.PI * v);
-}
-
-// ---------- Chain setup ----------
-function buildChain() {
-  seqDef = SEQUENCES.find(s => s.id === settings.seq) || SEQUENCES[3];
-  seq = seqDef.seq || randomSeq(40);
-  N = seq.length;
-  isH = new Uint8Array(N);
-  for (let i = 0; i < N; i++) isH[i] = seq[i] === 'H' ? 1 : 0;
-  x = new Float64Array(N); y = new Float64Array(N);
-  vx = new Float64Array(N); vy = new Float64Array(N);
-  fx = new Float64Array(N); fy = new Float64Array(N);
-  nContacts = new Uint8Array(N);
-  contactNow = new Uint8Array(N * N);
-  contactAvg = new Float32Array(N * N);
-  // Persistent random walk: an extended, unfolded starting coil.
-  let a = Math.random() * Math.PI * 2;
-  for (let i = 1; i < N; i++) {
-    a += (Math.random() - 0.5) * 1.1;
-    x[i] = x[i - 1] + Math.cos(a);
-    y[i] = y[i - 1] + Math.sin(a);
-  }
-  let cx = 0, cy = 0;
-  for (let i = 0; i < N; i++) { cx += x[i]; cy += y[i]; }
-  cx /= N; cy /= N;
-  for (let i = 0; i < N; i++) { x[i] -= cx; y[i] -= cy; }
-  hist = [];
-  bestE = 0;
-  grabbed = -1;
-  setPhase('hot');
-  phaseT = 2.5; // brief denatured hold, then cool and fold
-  cmap.width = N; cmap.height = N;
-  cmapImg = cmapCtx.createImageData(N, N);
-  buildSeqStrip();
-  resize();
-}
-
-// ---------- Forces ----------
-function computeForces(measure) {
-  fx.fill(0); fy.fill(0);
-  if (measure) { contactNow.fill(0); nContacts.fill(0); pairs.length = 0; }
-  let E = 0, cc = 0;
-
-  // Bonds
-  for (let i = 0; i < N - 1; i++) {
-    const dx = x[i + 1] - x[i], dy = y[i + 1] - y[i];
-    const r = Math.sqrt(dx * dx + dy * dy) || 1e-6;
-    let f = KB * (r - 1) / r;
-    if (Math.abs(f * r) > FMAX) f = Math.sign(f) * FMAX / r;
-    fx[i] += f * dx; fy[i] += f * dy;
-    fx[i + 1] -= f * dx; fy[i + 1] -= f * dy;
-  }
-
-  // Bending: U = k(1 - cos θ) between consecutive bond vectors
-  for (let i = 0; i < N - 2; i++) {
-    const ux = x[i + 1] - x[i], uy = y[i + 1] - y[i];
-    const wx = x[i + 2] - x[i + 1], wy = y[i + 2] - y[i + 1];
-    const lu = Math.sqrt(ux * ux + uy * uy) || 1e-6, lw = Math.sqrt(wx * wx + wy * wy) || 1e-6;
-    const c = (ux * wx + uy * wy) / (lu * lw);
-    const dcux = wx / (lu * lw) - c * ux / (lu * lu), dcuy = wy / (lu * lw) - c * uy / (lu * lu);
-    const dcwx = ux / (lu * lw) - c * wx / (lw * lw), dcwy = uy / (lu * lw) - c * wy / (lw * lw);
-    const fax = -KANG * dcux, fay = -KANG * dcuy;
-    const fcx = KANG * dcwx, fcy = KANG * dcwy;
-    fx[i] += fax; fy[i] += fay;
-    fx[i + 2] += fcx; fy[i + 2] += fcy;
-    fx[i + 1] -= fax + fcx; fy[i + 1] -= fay + fcy;
-  }
-
-  // Non-bonded: H–H attract (Lennard-Jones), everything else only repels (WCA)
-  for (let i = 0; i < N - 2; i++) {
-    const xi = x[i], yi = y[i], hi = isH[i];
-    for (let j = i + 2; j < N; j++) {
-      const dx = xi - x[j], dy = yi - y[j];
-      let r2 = dx * dx + dy * dy;
-      const hh = hi && isH[j];
-      const cut = hh ? RC2 : WCA2;
-      if (r2 >= cut) continue;
-      if (r2 < 0.04) r2 = 0.04;
-      const inv2 = 1 / r2, s6 = inv2 * inv2 * inv2, s12 = s6 * s6;
-      let f = 24 * EPS * (2 * s12 - s6) * inv2;
-      const fr = f * Math.sqrt(r2);
-      if (fr > FMAX) f = FMAX / Math.sqrt(r2);
-      fx[i] += f * dx; fy[i] += f * dy;
-      fx[j] -= f * dx; fy[j] -= f * dy;
-      if (measure) {
-        if (hh) {
-          E += 4 * EPS * (s12 - s6) - LJ_SHIFT;
-          if (r2 < CONTACT2) {
-            cc++;
-            contactNow[i * N + j] = 1;
-            nContacts[i]++; nContacts[j]++;
-            pairs.push(i, j);
-          }
-        } else {
-          E += 4 * EPS * (s12 - s6) + EPS;
-        }
-      }
-    }
-  }
-
-  // Keep the molecule near the middle of the screen, and inside it
-  let cx = 0, cy = 0;
-  for (let i = 0; i < N; i++) { cx += x[i]; cy += y[i]; }
-  cx /= N; cy /= N;
-  const hw = W / 2 / S - 0.8, hh2 = H / 2 / S - 0.8;
-  for (let i = 0; i < N; i++) {
-    fx[i] -= 0.03 * cx; fy[i] -= 0.03 * cy;
-    if (x[i] > hw) fx[i] -= 60 * (x[i] - hw); else if (x[i] < -hw) fx[i] -= 60 * (x[i] + hw);
-    if (y[i] > hh2) fy[i] -= 60 * (y[i] - hh2); else if (y[i] < -hh2) fy[i] -= 60 * (y[i] + hh2);
-  }
-
-  // Finger pulling a bead
-  if (grabbed >= 0) {
-    let px = 40 * (target.x - x[grabbed]), py = 40 * (target.y - y[grabbed]);
-    const m = Math.hypot(px, py);
-    if (m > FMAX) { px *= FMAX / m; py *= FMAX / m; }
-    fx[grabbed] += px; fy[grabbed] += py;
-  }
-
-  if (measure) {
-    energy = E;
-    contactCount = cc;
-    let s = 0;
-    for (let i = 0; i < N; i++) s += (x[i] - cx) ** 2 + (y[i] - cy) ** 2;
-    rg = Math.sqrt(s / N);
-  }
-}
-
-// Langevin dynamics: velocity update, friction + thermal kicks, drift
-function step(measure) {
-  computeForces(measure);
-  const c1 = Math.exp(-GAMMA * DT), c2 = Math.sqrt((1 - c1 * c1) * T);
-  for (let i = 0; i < N; i++) {
-    vx[i] = (vx[i] + fx[i] * DT) * c1 + c2 * gauss();
-    vy[i] = (vy[i] + fy[i] * DT) * c1 + c2 * gauss();
-    x[i] += vx[i] * DT;
-    y[i] += vy[i] * DT;
-  }
+// ---------- Engine ----------
+const eng = createEngine();
+let protein = null;
+function applyParams() {
+  eng.params.pH = settings.ph;
+  eng.params.saltMM = settings.salt;
+  eng.params.redox = settings.redox;
 }
 
 // ---------- Temperature schedule ----------
+let phase = 'hot', phaseT = 0, T = 420;
 const PHASE_LABEL = { fold: 'Folding', heat: 'Heating', hot: 'Denatured', cool: 'Cooling' };
+const hotT = () => Math.min(460, settings.temp + 120);
 function setPhase(p) {
-  phase = p;
-  phaseT = 0;
-  if (p === 'heat') bestE = 0;
+  phase = p; phaseT = 0;
+  if (p === 'heat') { bestE = 0; note('phase', `Heating to ${hotT()} K`); }
+  if (p === 'cool') note('phase', `Cooling to ${settings.temp} K`);
 }
-function unfold() {
-  if (phase === 'fold' || phase === 'cool') setPhase('heat');
-}
+function heatNow() { if (phase === 'fold' || phase === 'cool') setPhase('heat'); }
 function updateSchedule(dt) {
   phaseT += dt;
+  const lo = settings.temp, hi = hotT();
   if (phase === 'fold') {
-    T = T_FOLD;
+    T = lo;
     if (settings.cycle > 0 && phaseT > settings.cycle) setPhase('heat');
   } else if (phase === 'heat') {
-    T = T_FOLD + (T_HOT - T_FOLD) * Math.min(1, phaseT / 2.5);
-    if (phaseT > 2.5) setPhase('hot');
+    T = lo + (hi - lo) * Math.min(1, phaseT / 3);
+    if (phaseT > 3) setPhase('hot');
   } else if (phase === 'hot') {
-    T = T_HOT;
-    if (phaseT > 4) setPhase('cool');
+    T = hi;
+    if (phaseT > 6) setPhase('cool');
   } else {
-    const k = Math.min(1, phaseT / 8);
-    T = T_HOT + (T_FOLD - T_HOT) * (1 - (1 - k) * (1 - k));
+    const k = Math.min(1, phaseT / 10);
+    T = hi + (lo - hi) * (1 - (1 - k) * (1 - k));
     if (k >= 1) setPhase('fold');
   }
+  eng.params.T = T;
 }
 
-// ---------- Solvent (ambient only: it jiggles faster when hot) ----------
+// ---------- Canvas + view ----------
+const canvas = document.getElementById('sim');
+const ctx = canvas.getContext('2d');
+let W = 0, H = 0, dpr = 1;
+let yaw = 0.4, pitch = -0.25, zoom = 10, view = [0, 0, 0];
+const CAM = 140; // camera distance, Å
+const css = getComputedStyle(document.documentElement);
+const tok = (n) => css.getPropertyValue(n).trim();
+const hex = (h) => { const n = parseInt(h.slice(1), 16); return [n >> 16 & 255, n >> 8 & 255, n & 255]; };
+const C = {};
+for (const k of ['ink', 'hydro', 'polar', 'pos', 'neg', 'sulfur', 'special', 'helix', 'strand', 'bond', 'haze', 'text']) C[k] = hex(tok('--' + k));
+const rgba = (c, a) => `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${a})`;
+const mix = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+const HYDRO = new Set('AVLIMFW'), SPECIAL = new Set('GP');
+
+function residueColor(i) {
+  const aa = eng.seq[i], q = eng.charge[i];
+  if (aa === 'C') return C.sulfur;
+  if (q > 0.5) return C.pos;
+  if (q < -0.5) return C.neg;
+  if (HYDRO.has(aa)) return C.hydro;
+  if (SPECIAL.has(aa)) return C.special;
+  return C.polar;
+}
+
+function resize() {
+  dpr = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr);
+  seedSolvent();
+  sizeSpark();
+}
+
+// Projected positions from the last frame (for hit testing)
+let PX, PY, PZ, PR, PS;
+function project() {
+  const N = eng.N, cy = Math.cos(yaw), sy = Math.sin(yaw), cp = Math.cos(pitch), sp = Math.sin(pitch);
+  for (let i = 0; i < N; i++) {
+    const dx = eng.x[i] - view[0], dy = eng.y[i] - view[1], dz = eng.z[i] - view[2];
+    const x1 = cy * dx + sy * dz, z1 = -sy * dx + cy * dz;
+    const y2 = cp * dy - sp * z1, z2 = sp * dy + cp * z1;
+    const s = zoom * CAM / (CAM - z2);
+    PX[i] = W / 2 + x1 * s; PY[i] = H / 2 + y2 * s; PZ[i] = z2; PS[i] = s;
+    PR[i] = eng.radius(i) * 0.5 * s;
+  }
+}
+function unproject(sx, sy, z2) {
+  const s = zoom * CAM / (CAM - z2);
+  const x1 = (sx - W / 2) / s, y2 = (sy - H / 2) / s;
+  const cy = Math.cos(yaw), syw = Math.sin(yaw), cp = Math.cos(pitch), sp = Math.sin(pitch);
+  const dy = cp * y2 + sp * z2, z1 = -sp * y2 + cp * z2;
+  return [cy * x1 - syw * z1 + view[0], dy + view[1], syw * x1 + cy * z1 + view[2]];
+}
+
+// ---------- Solvent (ambient: moves faster when hot) ----------
 let solvent = [];
 function seedSolvent() {
   const n = Math.min(420, Math.floor(W * H / 8000));
   solvent = [];
-  for (let i = 0; i < n; i++) {
-    solvent.push({ x: Math.random() * W, y: Math.random() * H, vx: 0, vy: 0, a: 0.08 + Math.random() * 0.14 });
-  }
+  for (let i = 0; i < n; i++) solvent.push({ x: Math.random() * W, y: Math.random() * H, vx: 0, vy: 0, a: 0.06 + Math.random() * 0.12 });
 }
+function gauss() { let u = 0; while (u === 0) u = Math.random(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * Math.random()); }
 function updateSolvent(dt) {
-  const kick = Math.sqrt(T) * (reduceMotion ? 40 : 140) * Math.sqrt(dt);
-  const damp = Math.exp(-2 * dt);
+  const kick = Math.sqrt(T / 300) * (reduceMotion ? 30 : 90) * Math.sqrt(dt), damp = Math.exp(-2 * dt);
   for (const p of solvent) {
-    p.vx = p.vx * damp + gauss() * kick;
-    p.vy = p.vy * damp + gauss() * kick;
+    p.vx = p.vx * damp + gauss() * kick; p.vy = p.vy * damp + gauss() * kick;
     p.x += p.vx * dt; p.y += p.vy * dt;
     if (p.x < 0) p.x += W; else if (p.x > W) p.x -= W;
     if (p.y < 0) p.y += H; else if (p.y > H) p.y -= H;
   }
 }
 
-// ---------- Rendering ----------
+// ---------- Drawing ----------
 let ripples = [];
-function resize() {
-  dpr = Math.min(window.devicePixelRatio || 1, 2);
-  W = window.innerWidth; H = window.innerHeight;
-  canvas.width = Math.round(W * dpr);
-  canvas.height = Math.round(H * dpr);
-  S = Math.min(W, H) / (3.4 * Math.sqrt(N || 48));
-  seedSolvent();
-  sizeSpark();
-}
-const toWorld = (sx, sy) => ({ x: (sx - W / 2) / S, y: (sy - H / 2) / S });
-
+const order = [];
 function draw(now) {
+  const N = eng.N, st = eng.stats;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, W, H);
-
-  // Solvent
-  for (const p of solvent) {
-    ctx.fillStyle = `rgba(${RGB.polar[0]},${RGB.polar[1]},${RGB.polar[2]},${p.a})`;
-    ctx.fillRect(p.x, p.y, 1.6, 1.6);
-  }
-
-  // Tap ripples
+  for (const p of solvent) { ctx.fillStyle = rgba(C.polar, p.a); ctx.fillRect(p.x, p.y, 1.6, 1.6); }
   ripples = ripples.filter(r => now - r.t < 700);
   for (const r of ripples) {
     const k = (now - r.t) / 700;
-    ctx.beginPath();
-    ctx.arc(r.x, r.y, 8 + k * 4 * S, 0, Math.PI * 2);
-    ctx.strokeStyle = `rgba(${RGB.polar[0]},${RGB.polar[1]},${RGB.polar[2]},${0.35 * (1 - k)})`;
-    ctx.lineWidth = 1.5;
-    ctx.stroke();
+    ctx.beginPath(); ctx.arc(r.x, r.y, 8 + k * 60, 0, Math.PI * 2);
+    ctx.strokeStyle = rgba(C.polar, 0.35 * (1 - k)); ctx.lineWidth = 1.5; ctx.stroke();
   }
 
-  // World space: 1 unit = one bead diameter (σ)
-  ctx.setTransform(dpr * S, 0, 0, dpr * S, dpr * W / 2, dpr * H / 2);
+  project();
+  let zmin = Infinity, zmax = -Infinity;
+  for (let i = 0; i < N; i++) { if (PZ[i] < zmin) zmin = PZ[i]; if (PZ[i] > zmax) zmax = PZ[i]; }
+  const zspan = Math.max(1, zmax - zmin);
+  const near = (z) => (z - zmin) / zspan; // 0 far … 1 near
+  const fog = (col, z) => mix(C.ink, col, 0.35 + 0.65 * near(z));
   ctx.lineCap = 'round';
-  ctx.lineJoin = 'round';
 
-  // H–H contacts: the hydrophobic core as a network
-  if (pairs.length) {
-    ctx.beginPath();
-    for (let k = 0; k < pairs.length; k += 2) {
-      const i = pairs[k], j = pairs[k + 1];
-      ctx.moveTo(x[i], y[i]);
-      ctx.lineTo(x[j], y[j]);
-    }
-    ctx.strokeStyle = `rgba(${RGB.hydro[0]},${RGB.hydro[1]},${RGB.hydro[2]},0.28)`;
-    ctx.lineWidth = 0.07;
-    ctx.stroke();
-  }
-
-  // Backbone, smoothed through bead centres
+  // Hydrophobic contacts and salt bridges sit underneath everything
+  ctx.lineWidth = Math.max(0.6, zoom * 0.18);
+  ctx.strokeStyle = rgba(C.hydro, 0.16);
   ctx.beginPath();
-  ctx.moveTo(x[0], y[0]);
-  for (let i = 1; i < N - 1; i++) {
-    ctx.quadraticCurveTo(x[i], y[i], (x[i] + x[i + 1]) / 2, (y[i] + y[i + 1]) / 2);
+  for (let i = 0; i < N; i++) for (let j = i + 3; j < N; j++) {
+    if (eng.contact[i * N + j] && HYDRO.has(eng.seq[i]) && HYDRO.has(eng.seq[j])) { ctx.moveTo(PX[i], PY[i]); ctx.lineTo(PX[j], PY[j]); }
   }
-  ctx.lineTo(x[N - 1], y[N - 1]);
-  ctx.strokeStyle = COL.bond;
-  ctx.lineWidth = 0.2;
   ctx.stroke();
+  ctx.setLineDash([3, 4]);
+  ctx.strokeStyle = rgba(C.text, 0.35);
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (const [i, j] of st.bridges || []) { ctx.moveTo(PX[i], PY[i]); ctx.lineTo(PX[j], PY[j]); }
+  ctx.stroke();
+  ctx.setLineDash([]);
 
-  // Beads
-  for (let i = 0; i < N; i++) {
-    if (isH[i]) {
-      const buried = nContacts[i] > 0;
-      if (buried) {
-        ctx.beginPath();
-        ctx.arc(x[i], y[i], 0.8, 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(${RGB.hydro[0]},${RGB.hydro[1]},${RGB.hydro[2]},${Math.min(0.08 * nContacts[i], 0.22)})`;
-        ctx.fill();
-      }
-      ctx.beginPath();
-      ctx.arc(x[i], y[i], 0.4, 0, Math.PI * 2);
-      ctx.fillStyle = buried ? COL.hydro : COL.hydroDim;
-      ctx.fill();
-      ctx.beginPath();
-      ctx.arc(x[i] - 0.12, y[i] - 0.12, 0.13, 0, Math.PI * 2);
-      ctx.fillStyle = buried ? 'rgba(255,240,215,0.55)' : 'rgba(255,240,215,0.18)';
-      ctx.fill();
+  // Depth-sorted backbone segments, disulfides and residues
+  order.length = 0;
+  for (let i = 0; i < N - 1; i++) order.push({ z: (PZ[i] + PZ[i + 1]) / 2 - 0.01, k: 0, i });
+  for (const [i, j] of st.disulfides || []) order.push({ z: (PZ[i] + PZ[j]) / 2 - 0.02, k: 1, i, j });
+  for (let i = 0; i < N; i++) order.push({ z: PZ[i], k: 2, i });
+  order.sort((a, b) => a.z - b.z);
+  for (const o of order) {
+    if (o.k === 0) {
+      const i = o.i, a = eng.ss[i], b = eng.ss[i + 1];
+      const kind = a === b ? a : 0;
+      const col = kind === 1 ? C.helix : kind === 2 ? C.strand : C.bond;
+      ctx.strokeStyle = rgba(fog(col, o.z), 1);
+      ctx.lineWidth = (kind ? 1.3 : 0.55) * (PS[i] + PS[i + 1]) / 2;
+      ctx.beginPath(); ctx.moveTo(PX[i], PY[i]); ctx.lineTo(PX[i + 1], PY[i + 1]); ctx.stroke();
+    } else if (o.k === 1) {
+      ctx.strokeStyle = rgba(fog(C.sulfur, o.z), 0.95);
+      ctx.lineWidth = 0.7 * (PS[o.i] + PS[o.j]) / 2;
+      ctx.beginPath(); ctx.moveTo(PX[o.i], PY[o.i]); ctx.lineTo(PX[o.j], PY[o.j]); ctx.stroke();
     } else {
-      ctx.beginPath();
-      ctx.arc(x[i], y[i], 0.3, 0, Math.PI * 2);
-      ctx.fillStyle = COL.ink;
-      ctx.fill();
-      ctx.strokeStyle = COL.polar;
-      ctx.lineWidth = 0.1;
-      ctx.stroke();
-    }
-    if (i === grabbed) {
-      ctx.beginPath();
-      ctx.arc(x[i], y[i], 0.75, 0, Math.PI * 2);
-      ctx.strokeStyle = 'rgba(228,232,243,0.6)';
-      ctx.lineWidth = 0.06;
-      ctx.stroke();
+      const i = o.i, r = PR[i], col = fog(residueColor(i), o.z);
+      ctx.beginPath(); ctx.arc(PX[i], PY[i], r, 0, Math.PI * 2);
+      ctx.fillStyle = rgba(col, 1); ctx.fill();
+      ctx.strokeStyle = 'rgba(4,6,12,0.45)'; ctx.lineWidth = 1; ctx.stroke();
+      ctx.beginPath(); ctx.arc(PX[i] - r * 0.3, PY[i] - r * 0.3, r * 0.38, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(255,255,255,${0.1 + 0.2 * near(o.z)})`; ctx.fill();
+      const q = eng.charge[i];
+      if (Math.abs(q) > 0.5 && r > 5) {
+        ctx.strokeStyle = 'rgba(4,6,12,0.75)'; ctx.lineWidth = Math.max(1.2, r * 0.18);
+        const g = r * 0.42;
+        ctx.beginPath(); ctx.moveTo(PX[i] - g, PY[i]); ctx.lineTo(PX[i] + g, PY[i]);
+        if (q > 0) { ctx.moveTo(PX[i], PY[i] - g); ctx.lineTo(PX[i], PY[i] + g); }
+        ctx.stroke();
+      }
+      if (i === eng.grab) {
+        ctx.beginPath(); ctx.arc(PX[i], PY[i], r + 5, 0, Math.PI * 2);
+        ctx.strokeStyle = rgba(C.text, 0.7); ctx.lineWidth = 1.5; ctx.stroke();
+      }
     }
   }
 
-  // Termini labels
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.font = `500 ${Math.max(9, Math.round(S * 0.32))}px ${css.getPropertyValue('--f-data')}`;
-  ctx.fillStyle = COL.haze;
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  const label = (i, j, t) => {
-    const dx = x[i] - x[j], dy = y[i] - y[j], m = Math.hypot(dx, dy) || 1;
-    ctx.fillText(t, W / 2 + (x[i] + dx / m * 0.85) * S, H / 2 + (y[i] + dy / m * 0.85) * S);
+  // Reaction flashes: proton transfers (small rings) and disulfide chemistry (sulfur bursts)
+  for (const f of eng.flashes) {
+    const age = eng.time - f.t, i = f.res;
+    if (i >= N) continue;
+    if (f.kind === 'ss') {
+      const k = age / 1.2;
+      ctx.beginPath(); ctx.arc(PX[i], PY[i], PR[i] + k * 30, 0, Math.PI * 2);
+      ctx.strokeStyle = rgba(C.sulfur, 0.8 * (1 - k)); ctx.lineWidth = 2; ctx.stroke();
+    } else if (age < 0.45) {
+      const k = age / 0.45;
+      ctx.beginPath(); ctx.arc(PX[i], PY[i], PR[i] + 2 + k * 10, 0, Math.PI * 2);
+      ctx.strokeStyle = rgba(f.kind === 'gained' ? C.pos : C.text, 0.5 * (1 - k)); ctx.lineWidth = 1.2; ctx.stroke();
+    }
+  }
+
+  // Termini
+  ctx.font = `500 ${Math.max(10, Math.round(zoom * 1.1))}px ${css.getPropertyValue('--f-data')}`;
+  ctx.fillStyle = rgba(C.haze, 1);
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  const lab = (i, j, t) => {
+    const dx = PX[i] - PX[j], dy = PY[i] - PY[j], m = Math.hypot(dx, dy) || 1;
+    ctx.fillText(t, PX[i] + dx / m * (PR[i] + 12), PY[i] + dy / m * (PR[i] + 12));
   };
-  label(0, 1, 'N');
-  label(N - 1, N - 2, 'C');
+  lab(0, 1, 'N'); lab(N - 1, N - 2, 'C');
 }
 
 // ---------- Readout ----------
 const $ = (id) => document.getElementById(id);
-const hudEl = $('hud'), phaseEl = $('phase'), phaseText = $('phaseText'), tempEl = $('temp');
-const energyEl = $('energy'), contactsEl = $('contacts'), rgEl = $('rg'), seqNameEl = $('seqName');
-const seqStrip = $('seqStrip');
+const phaseEl = $('phase'), phaseText = $('phaseText'), condEl = $('cond'), pnameEl = $('pname'), seqEl = $('seq');
+const sE = $('sE'), sRg = $('sRg'), sSS = $('sSS'), sQ = $('sQ'), sSB = $('sSB'), sDS = $('sDS'), feedEl = $('feed');
 const spark = $('spark'), sparkCtx = spark.getContext('2d');
 const cmap = $('cmap'), cmapCtx = cmap.getContext('2d');
-let cmapImg = null;
-let seqCells = [];
-const fmt = (v, d = 1) => (v < -0.05 ? '−' : '') + Math.abs(v).toFixed(d);
+let cmapImg, contactAvg, seqSpans = [], hist = [], bestE = 0, notes = [];
+const HIST_LEN = 240;
+const minus = (v, d) => (v < -0.05 ? '−' : '') + Math.abs(v).toFixed(d);
+const signed = (v) => (v > 0 ? '+' : v < 0 ? '−' : '') + Math.abs(v);
 
-function buildSeqStrip() {
-  seqStrip.textContent = '';
-  seqCells = [];
-  for (let i = 0; i < N; i++) {
-    const c = document.createElement('i');
-    c.className = isH[i] ? 'h' : 'p';
-    seqStrip.appendChild(c);
-    seqCells.push(c);
+function note(kind, text) { notes.unshift({ t: eng.time, kind, text }); if (notes.length > 20) notes.pop(); }
+
+function buildReadout() {
+  seqEl.textContent = '';
+  seqSpans = [];
+  for (let i = 0; i < eng.N; i++) {
+    const s = document.createElement('span');
+    s.textContent = eng.seq[i];
+    seqEl.appendChild(s); seqSpans.push(s);
   }
-  const hCount = isH.reduce((a, b) => a + b, 0);
-  seqNameEl.textContent = `${seqDef.name} · ${hCount} H / ${N - hCount} P`;
+  const ss = protein.native ? ` · ${protein.native.length} native S–S` : '';
+  pnameEl.textContent = `${protein.name} · ${eng.N} residues${ss}`;
+  cmap.width = eng.N; cmap.height = eng.N;
+  cmapImg = cmapCtx.createImageData(eng.N, eng.N);
+  contactAvg = new Float32Array(eng.N * eng.N);
+  hist = []; bestE = 0; notes = [];
 }
 function sizeSpark() {
   const r = spark.getBoundingClientRect();
-  spark.width = Math.max(1, Math.round(r.width * dpr));
-  spark.height = Math.max(1, Math.round(r.height * dpr));
+  spark.width = Math.max(1, Math.round(r.width * dpr)); spark.height = Math.max(1, Math.round(r.height * dpr));
 }
 function drawSpark() {
   const w = spark.width, h = spark.height;
   sparkCtx.clearRect(0, 0, w, h);
   if (hist.length < 2) return;
-  let lo = Math.min(...hist, bestE), hi = Math.max(...hist, 0);
-  if (hi - lo < 2) lo = hi - 2;
-  const pad = 3 * dpr;
-  const X = (i) => (i / (HIST_LEN - 1)) * w;
-  const Y = (v) => pad + (1 - (v - lo) / (hi - lo)) * (h - 2 * pad);
-  const off = HIST_LEN - hist.length;
-  // lowest energy reached since the last unfold
-  sparkCtx.setLineDash([2 * dpr, 3 * dpr]);
-  sparkCtx.strokeStyle = 'rgba(138,148,176,0.5)';
-  sparkCtx.lineWidth = dpr;
-  sparkCtx.beginPath();
-  sparkCtx.moveTo(0, Y(bestE)); sparkCtx.lineTo(w, Y(bestE));
-  sparkCtx.stroke();
-  sparkCtx.setLineDash([]);
-  sparkCtx.beginPath();
-  hist.forEach((v, i) => { const px = X(i + off), py = Y(v); i ? sparkCtx.lineTo(px, py) : sparkCtx.moveTo(px, py); });
-  sparkCtx.lineTo(w, h); sparkCtx.lineTo(X(off), h); sparkCtx.closePath();
-  sparkCtx.fillStyle = `rgba(${RGB.hydro[0]},${RGB.hydro[1]},${RGB.hydro[2]},0.12)`;
-  sparkCtx.fill();
-  sparkCtx.beginPath();
-  hist.forEach((v, i) => { const px = X(i + off), py = Y(v); i ? sparkCtx.lineTo(px, py) : sparkCtx.moveTo(px, py); });
-  sparkCtx.strokeStyle = COL.hydro;
-  sparkCtx.lineWidth = 1.5 * dpr;
-  sparkCtx.stroke();
-  sparkCtx.beginPath();
-  sparkCtx.arc(w - 2.5 * dpr, Y(hist[hist.length - 1]), 2.5 * dpr, 0, Math.PI * 2);
-  sparkCtx.fillStyle = COL.hydro;
-  sparkCtx.fill();
+  let lo = Math.min(...hist, bestE), hi = Math.max(...hist);
+  if (hi - lo < 5) lo = hi - 5;
+  const pad = 3 * dpr, off = HIST_LEN - hist.length;
+  const X = (i) => ((i + off) / (HIST_LEN - 1)) * w, Y = (v) => pad + (1 - (v - lo) / (hi - lo)) * (h - 2 * pad);
+  sparkCtx.setLineDash([2 * dpr, 3 * dpr]); sparkCtx.strokeStyle = rgba(C.haze, 0.5); sparkCtx.lineWidth = dpr;
+  sparkCtx.beginPath(); sparkCtx.moveTo(0, Y(bestE)); sparkCtx.lineTo(w, Y(bestE)); sparkCtx.stroke(); sparkCtx.setLineDash([]);
+  const path = () => { sparkCtx.beginPath(); hist.forEach((v, i) => i ? sparkCtx.lineTo(X(i), Y(v)) : sparkCtx.moveTo(X(i), Y(v))); };
+  path(); sparkCtx.lineTo(w, h); sparkCtx.lineTo(X(0), h); sparkCtx.closePath(); sparkCtx.fillStyle = rgba(C.hydro, 0.12); sparkCtx.fill();
+  path(); sparkCtx.strokeStyle = rgba(C.hydro, 1); sparkCtx.lineWidth = 1.5 * dpr; sparkCtx.stroke();
+  sparkCtx.beginPath(); sparkCtx.arc(w - 2.5 * dpr, Y(hist[hist.length - 1]), 2.5 * dpr, 0, Math.PI * 2); sparkCtx.fillStyle = rgba(C.hydro, 1); sparkCtx.fill();
 }
-// Upper triangle: contacts right now. Lower triangle: how often each contact has formed recently.
+// Upper triangle: contacts now. Lower: how often each contact formed recently. Sulfur: disulfides (dim where native but unformed).
 function drawCmap() {
-  const d = cmapImg.data, [br, bg, bb] = [18, 25, 44];
-  for (let i = 0; i < N; i++) {
-    for (let j = 0; j < N; j++) {
-      const o = (i * N + j) * 4;
-      let r = br, g = bg, b = bb;
-      if (i === j) { r = 70; g = 80; b = 108; }
-      else if (j > i) {
-        if (contactNow[i * N + j]) [r, g, b] = RGB.hydro;
-      } else {
-        const a = Math.min(1, contactAvg[j * N + i] * 1.4);
-        r = br + (RGB.polar[0] - br) * a; g = bg + (RGB.polar[1] - bg) * a; b = bb + (RGB.polar[2] - bb) * a;
-      }
-      d[o] = r; d[o + 1] = g; d[o + 2] = b; d[o + 3] = 255;
+  const N = eng.N, d = cmapImg.data, bg = [18, 25, 44];
+  const ssNow = new Set((eng.stats.disulfides || []).map(([i, j]) => i * N + j));
+  const nat = new Set((protein.native || []).map(([a, b]) => (a - 1) * N + (b - 1)));
+  for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) {
+    const o = (i * N + j) * 4;
+    let c = bg;
+    if (i === j) c = [70, 80, 108];
+    else if (j > i) {
+      if (ssNow.has(i * N + j)) c = C.sulfur;
+      else if (eng.contact[i * N + j]) c = C.hydro;
+    } else {
+      const key = j * N + i;
+      if (ssNow.has(key)) c = C.sulfur;
+      else if (nat.has(key)) c = mix(bg, C.sulfur, 0.45);
+      else c = mix(bg, C.polar, Math.min(1, contactAvg[key] * 1.4));
     }
+    d[o] = c[0]; d[o + 1] = c[1]; d[o + 2] = c[2]; d[o + 3] = 255;
   }
   cmapCtx.putImageData(cmapImg, 0, 0);
 }
-
-const HIST_LEN = 240; // 4 samples/s → 60 s
 let lastHud = 0;
 function hudTick(now) {
   if (now - lastHud < 250) return;
   lastHud = now;
-  hist.push(energy);
-  if (hist.length > HIST_LEN) hist.shift();
-  if (energy < bestE) bestE = energy;
-  for (let k = 0; k < N * N; k++) contactAvg[k] = contactAvg[k] * 0.97 + contactNow[k] * 0.03;
+  const st = eng.stats, N = eng.N;
+  hist.push(st.energy); if (hist.length > HIST_LEN) hist.shift();
+  if (st.energy < bestE) bestE = st.energy;
+  for (let k = 0; k < N * N; k++) contactAvg[k] = contactAvg[k] * 0.97 + eng.contact[k] * 0.03;
   if (!settings.hud) return;
   phaseText.textContent = PHASE_LABEL[phase];
   phaseEl.dataset.hot = String(phase === 'heat' || phase === 'hot');
-  tempEl.textContent = `T* ${T.toFixed(2)}`;
-  energyEl.innerHTML = `${fmt(energy)} <small>ε</small>`;
-  contactsEl.textContent = contactCount;
-  rgEl.innerHTML = `${rg.toFixed(1)} <small>σ</small>`;
-  for (let i = 0; i < N; i++) if (isH[i]) seqCells[i].classList.toggle('on', nContacts[i] > 0);
+  condEl.textContent = `${Math.round(T)} K · pH ${settings.ph.toFixed(1)} · ${settings.salt} mM`;
+  sE.innerHTML = `${minus(st.energy, 0)} <small>kcal/mol</small>`;
+  sRg.innerHTML = `${st.rg.toFixed(1)} <small>Å</small>`;
+  sSS.innerHTML = `${Math.round(st.helix * 100)} · ${Math.round(st.strand * 100)} <small>%</small>`;
+  sQ.innerHTML = `${signed(st.netCharge)} <small>e</small>`;
+  sSB.textContent = st.bridges.length;
+  const nds = st.disulfides.length, nnat = st.disulfides.filter(s => s[2]).length;
+  sDS.innerHTML = protein.native ? `${nds} <small>${nnat} native</small>` : (eng.seq.includes('C') ? String(nds) : '<small>no Cys</small>');
+  for (let i = 0; i < N; i++) {
+    const s = seqSpans[i];
+    s.className = eng.ss[i] === 1 ? 'h' : eng.ss[i] === 2 ? 'e' : '';
+    s.style.color = rgba(residueColor(i), 1);
+  }
+  // Newest three events: chemistry from the engine plus phase changes
+  const all = eng.events.map(e => ({ ...e, ss: true })).concat(notes).sort((a, b) => b.t - a.t).slice(0, 3);
+  feedEl.innerHTML = all.map(e => `<div class="${e.ss ? 'ss' : ''}"><i>${e.t.toFixed(0)} s</i><b>${e.text}</b></div>`).join('');
   drawSpark();
   drawCmap();
 }
 
 // ---------- Main loop ----------
-let last = performance.now();
+let last = performance.now(), msPerStep = 0.05, stepDebt = 0;
 function frame(now) {
   requestAnimationFrame(frame);
   if (settings.saver && now - last < 32) return;
   const dt = Math.min((now - last) / 1000, 0.1);
   last = now;
   updateSchedule(dt);
-  const steps = Math.min(300, Math.max(1, Math.round(settings.speed * 3000 * dt)));
-  for (let s = 0; s < steps; s++) step(s === steps - 1);
+  eng.advanceClock(dt);
+  // Aim for 2000 steps per second at 1×, within a per-frame time budget
+  const budget = settings.saver ? 6 : 10;
+  stepDebt += settings.speed * 2000 * dt;
+  let n = Math.min(Math.floor(stepDebt), Math.max(1, Math.floor(budget / msPerStep)));
+  stepDebt = Math.min(stepDebt - n, 200);
+  if (n > 0) {
+    const t0 = performance.now();
+    eng.step(n, false);
+    msPerStep = 0.9 * msPerStep + 0.1 * ((performance.now() - t0) / n);
+  }
+  eng.measure();
+  // Camera: follow the centre, zoom to fit, turn slowly unless a finger is on it
+  const c = eng.stats.center;
+  for (let k = 0; k < 3; k++) view[k] += (c[k] - view[k]) * Math.min(1, dt * 3);
+  const fit = Math.min(W, H) * 0.42 / Math.max(2.2 * eng.stats.rg, 16);
+  zoom += (fit - zoom) * Math.min(1, dt * 1.2);
+  if (!down) yaw += dt * (reduceMotion ? 0.03 : 0.12);
   updateSolvent(dt);
   draw(now);
   hudTick(now);
@@ -800,76 +1190,69 @@ let down = null, lastTap = null, pressTimer = 0;
 canvas.addEventListener('pointerdown', (e) => {
   if (!sheet.hidden) { closeSheet(); return; }
   try { canvas.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
-  const p = toWorld(e.clientX, e.clientY);
-  let best = -1, bd = 1.6 * 1.6;
-  for (let i = 0; i < N; i++) {
-    const d = (x[i] - p.x) ** 2 + (y[i] - p.y) ** 2;
-    if (d < bd) { bd = d; best = i; }
+  let best = -1, bz = -Infinity;
+  for (let i = 0; i < eng.N; i++) {
+    const d = Math.hypot(PX[i] - e.clientX, PY[i] - e.clientY);
+    if (d < PR[i] + 14 && PZ[i] > bz) { bz = PZ[i]; best = i; }
   }
-  grabbed = best;
-  target = p;
-  down = { id: e.pointerId, sx: e.clientX, sy: e.clientY, t: performance.now(), moved: false, long: false };
+  eng.grab = best;
+  if (best >= 0) eng.target = unproject(e.clientX, e.clientY, PZ[best]);
+  down = { id: e.pointerId, sx: e.clientX, sy: e.clientY, lx: e.clientX, ly: e.clientY, t: performance.now(), moved: false, long: false };
   clearTimeout(pressTimer);
-  pressTimer = setTimeout(() => {
-    if (down && !down.moved) { down.long = true; grabbed = -1; openSheet(); }
-  }, 650);
+  pressTimer = setTimeout(() => { if (down && !down.moved) { down.long = true; eng.grab = -1; openSheet(); } }, 650);
 });
 canvas.addEventListener('pointermove', (e) => {
   if (!down || e.pointerId !== down.id) return;
-  if (!down.moved && Math.hypot(e.clientX - down.sx, e.clientY - down.sy) > 8) {
-    down.moved = true;
-    clearTimeout(pressTimer);
+  if (!down.moved && Math.hypot(e.clientX - down.sx, e.clientY - down.sy) > 8) { down.moved = true; clearTimeout(pressTimer); }
+  if (eng.grab >= 0) eng.target = unproject(e.clientX, e.clientY, PZ[eng.grab]);
+  else if (down.moved) {
+    yaw += (e.clientX - down.lx) * 0.006;
+    pitch = Math.max(-1.3, Math.min(1.3, pitch + (e.clientY - down.ly) * 0.006));
   }
-  if (grabbed >= 0) target = toWorld(e.clientX, e.clientY);
+  down.lx = e.clientX; down.ly = e.clientY;
 });
 function endPointer(e) {
   if (!down || e.pointerId !== down.id) return;
   clearTimeout(pressTimer);
   const now = performance.now();
   if (!down.moved && !down.long && now - down.t < 350) {
-    if (grabbed < 0) poke(e.clientX, e.clientY);
-    if (lastTap && now - lastTap.t < 330 && Math.hypot(e.clientX - lastTap.x, e.clientY - lastTap.y) < 50) {
-      unfold();
-      lastTap = null;
-    } else {
-      lastTap = { t: now, x: e.clientX, y: e.clientY };
+    if (eng.grab < 0) {
+      ripples.push({ x: e.clientX, y: e.clientY, t: now });
+      const p = unproject(e.clientX, e.clientY, 0);
+      eng.kick(p[0], p[1], p[2], 14, 2.5);
     }
+    if (lastTap && now - lastTap.t < 330 && Math.hypot(e.clientX - lastTap.x, e.clientY - lastTap.y) < 50) { heatNow(); lastTap = null; }
+    else lastTap = { t: now, x: e.clientX, y: e.clientY };
   }
-  grabbed = -1;
+  eng.grab = -1;
   down = null;
 }
 canvas.addEventListener('pointerup', endPointer);
 canvas.addEventListener('pointercancel', endPointer);
 
-function poke(sx, sy) {
-  ripples.push({ x: sx, y: sy, t: performance.now() });
-  const p = toWorld(sx, sy);
-  for (let i = 0; i < N; i++) {
-    const dx = x[i] - p.x, dy = y[i] - p.y, d = Math.hypot(dx, dy);
-    if (d < 4 && d > 0.01) { const k = 5 * (1 - d / 4) / d; vx[i] += dx * k; vy[i] += dy * k; }
-  }
-  for (const s of solvent) {
-    const dx = s.x - sx, dy = s.y - sy, d = Math.hypot(dx, dy), R = 4 * S;
-    if (d < R && d > 1) { const k = 260 * (1 - d / R) / d; s.vx += dx * k; s.vy += dy * k; }
-  }
-}
-
 // ---------- Settings panel ----------
 const sheet = $('sheet'), gear = $('gear');
-const seqSel = $('seqSel'), speed = $('speed'), speedOut = $('speedOut'), cycle = $('cycle');
-const showHud = $('showHud'), saver = $('saver');
-for (const s of SEQUENCES) {
+const F = {
+  protein: $('protein'), temp: $('temp'), ph: $('ph'), salt: $('salt'), redox: $('redox'),
+  speed: $('speed'), cycle: $('cycle'), showHud: $('showHud'), saver: $('saver'),
+};
+for (const p of PROTEINS) {
   const o = document.createElement('option');
-  o.value = s.id; o.textContent = s.seq ? `${s.name} (${s.seq.length})` : s.name;
-  seqSel.appendChild(o);
+  o.value = p.id; o.textContent = `${p.name} (${p.seq.length})`;
+  F.protein.appendChild(o);
 }
+const redoxLabel = (r) => r <= -0.6 ? 'Strongly reducing' : r < -0.15 ? 'Reducing' : r <= 0.15 ? 'Balanced' : r < 0.6 ? 'Oxidizing' : 'Strongly oxidizing';
 function syncForm() {
-  seqSel.value = settings.seq;
-  speed.value = settings.speed;
-  speedOut.textContent = `${settings.speed}×`;
-  cycle.value = String(settings.cycle);
-  showHud.checked = settings.hud;
-  saver.checked = settings.saver;
+  F.protein.value = settings.protein;
+  $('proteinNote').textContent = (PROTEINS.find(p => p.id === settings.protein) || PROTEINS[0]).note;
+  F.temp.value = settings.temp; $('tempOut').textContent = `${settings.temp} K · ${settings.temp - 273} °C`;
+  F.ph.value = settings.ph; $('phOut').textContent = settings.ph.toFixed(1);
+  const debye = 3.04 / Math.sqrt(Math.max(settings.salt, 1) / 1000);
+  F.salt.value = settings.salt; $('saltOut').textContent = `${settings.salt} mM · λD ${debye < 100 ? debye.toFixed(1) : '>96'} Å`;
+  F.redox.value = settings.redox; $('redoxOut').textContent = redoxLabel(settings.redox);
+  F.speed.value = settings.speed; $('speedOut').textContent = `${settings.speed}×`;
+  F.cycle.value = String(settings.cycle);
+  F.showHud.checked = settings.hud; F.saver.checked = settings.saver;
   document.body.classList.toggle('no-hud', !settings.hud);
 }
 function openSheet() { sheet.hidden = false; gear.setAttribute('aria-expanded', 'true'); }
@@ -877,23 +1260,37 @@ function closeSheet() { sheet.hidden = true; gear.setAttribute('aria-expanded', 
 gear.addEventListener('click', () => (sheet.hidden ? openSheet() : closeSheet()));
 $('closeSheet').addEventListener('click', closeSheet);
 sheet.addEventListener('submit', (e) => e.preventDefault());
-seqSel.addEventListener('change', () => { settings.seq = seqSel.value; saveSettings(); buildChain(); });
-speed.addEventListener('input', () => { settings.speed = parseFloat(speed.value); speedOut.textContent = `${settings.speed}×`; saveSettings(); });
-cycle.addEventListener('change', () => { settings.cycle = parseInt(cycle.value, 10); saveSettings(); });
-showHud.addEventListener('change', () => {
-  settings.hud = showHud.checked; saveSettings(); syncForm();
-  if (settings.hud) { sizeSpark(); lastHud = 0; }
-});
-saver.addEventListener('change', () => { settings.saver = saver.checked; saveSettings(); });
-$('unfoldBtn').addEventListener('click', () => { unfold(); closeSheet(); });
+const onNum = (el, key, parse) => el.addEventListener('input', () => { settings[key] = parse(el.value); save(); syncForm(); applyParams(); });
+onNum(F.temp, 'temp', (v) => parseInt(v, 10));
+onNum(F.ph, 'ph', parseFloat);
+onNum(F.salt, 'salt', (v) => parseInt(v, 10));
+onNum(F.redox, 'redox', parseFloat);
+onNum(F.speed, 'speed', parseFloat);
+F.cycle.addEventListener('change', () => { settings.cycle = parseInt(F.cycle.value, 10); save(); });
+F.protein.addEventListener('change', () => { settings.protein = F.protein.value; save(); syncForm(); load(); });
+F.showHud.addEventListener('change', () => { settings.hud = F.showHud.checked; save(); syncForm(); if (settings.hud) { sizeSpark(); lastHud = 0; } });
+F.saver.addEventListener('change', () => { settings.saver = F.saver.checked; save(); });
+$('unfoldBtn').addEventListener('click', () => { heatNow(); closeSheet(); });
+$('resetBtn').addEventListener('click', () => { load(); closeSheet(); });
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeSheet(); });
 
+// ---------- Start ----------
+function load() {
+  protein = PROTEINS.find(p => p.id === settings.protein) || PROTEINS[0];
+  applyParams();
+  eng.params.T = hotT();
+  eng.load(protein);
+  const N = eng.N;
+  PX = new Float64Array(N); PY = new Float64Array(N); PZ = new Float64Array(N); PR = new Float64Array(N); PS = new Float64Array(N);
+  buildReadout();
+  view = eng.stats.center.slice();
+  zoom = Math.min(W, H) * 0.42 / Math.max(2.2 * eng.stats.rg, 16);
+  setPhase('hot'); phaseT = 3; // a moment denatured, then cool and fold
+}
 window.addEventListener('resize', resize);
-if (clean && !localStorage_has()) settings.hud = false;
-function localStorage_has() { try { return localStorage.getItem(STORE_KEY) !== null; } catch (e) { return false; } }
-
+resize();
 syncForm();
-buildChain();
+load();
 requestAnimationFrame((t) => { last = t; frame(t); });
 })();
 </script>
