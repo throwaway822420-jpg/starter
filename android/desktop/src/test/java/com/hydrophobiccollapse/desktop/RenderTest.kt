@@ -2,6 +2,7 @@ package com.hydrophobiccollapse.desktop
 
 import com.hydrophobiccollapse.Simulation
 import com.hydrophobiccollapse.Settings
+import com.hydrophobiccollapse.gfx.PointerEvent
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.awt.image.BufferedImage
@@ -38,5 +39,31 @@ class RenderTest {
         sim.draw(Java2DCanvas(g)); g.dispose(); sim.release()
         File("build/render").mkdirs(); ImageIO.write(img, "png", File("build/render/desktop-ribosome.png"))
         assertTrue("still translating", sim.eng.translating && sim.eng.made > 1)
+    }
+
+    private fun render(sim: Simulation, name: String) {
+        val img = BufferedImage(1600, 1000, BufferedImage.TYPE_INT_ARGB)
+        val g = img.createGraphics()
+        sim.draw(Java2DCanvas(g)); g.dispose()
+        File("build/render").mkdirs(); ImageIO.write(img, "png", File("build/render/$name"))
+    }
+
+    /** Gene → protein: transcription, then the translation strip under the ribosome → build/render/desktop-*.png */
+    @Test fun rendersTranscriptionAndTranslation() {
+        System.setProperty("java.awt.headless", "true")
+        Java2DCanvas.install()
+        val sim = Simulation(1.5f, wallpaperMode = false)
+        sim.resize(1600, 1000)
+        sim.applySettings(Settings(protein = "hemoglobin", fromGene = true))
+        repeat(180) { sim.update(1.0 / 30) }
+        assertTrue("still transcribing", sim.isTranscribing)
+        render(sim, "desktop-transcription.png")
+        // A tap skips to translation
+        sim.onPointer(PointerEvent(PointerEvent.ACTION_DOWN, 800f, 500f, 0L))
+        sim.onPointer(PointerEvent(PointerEvent.ACTION_UP, 800f, 500f, 50L))
+        repeat(90) { sim.update(1.0 / 30) }
+        assertTrue(!sim.isTranscribing && sim.eng.translating)
+        render(sim, "desktop-translation.png")
+        sim.release()
     }
 }

@@ -314,6 +314,8 @@ data class Settings(
     val ribosome: Boolean = false,
     /** How fast the ribosome adds residues: 0 slow, 1 normal, 2 fast */
     val ribosomeSpeed: Int = 1,
+    /** Start each protein from its gene: transcription (DNA → mRNA), then translation codon by codon on the ribosome */
+    val fromGene: Boolean = false,
 ) {
     /** Writes every setting to a platform's key–value storage. */
     fun save(p: KeyValueStore) {
@@ -325,7 +327,7 @@ data class Settings(
         p.putString("customJson", customJson); p.putFloat("nativeBias", nativeBias); p.putInt("crowding", crowding)
         p.putInt("colorBy", colorBy); p.putInt("viewStyle", viewStyle)
         p.putBoolean("effects", effects); p.putBoolean("chaperone", chaperone); p.putInt("replaySpeed", replaySpeed)
-        p.putBoolean("ribosome", ribosome); p.putInt("ribosomeSpeed", ribosomeSpeed)
+        p.putBoolean("ribosome", ribosome); p.putInt("ribosomeSpeed", ribosomeSpeed); p.putBoolean("fromGene", fromGene)
         p.commit()
     }
 
@@ -363,6 +365,7 @@ data class Settings(
             replaySpeed = p.getInt("replaySpeed", d.replaySpeed),
             ribosome = p.getBoolean("ribosome", d.ribosome),
             ribosomeSpeed = p.getInt("ribosomeSpeed", d.ribosomeSpeed),
+            fromGene = p.getBoolean("fromGene", d.fromGene),
         )
     }
 }

@@ -430,6 +430,9 @@ class MainWindow(startAsWallpaper: Boolean) : JFrame("Hydrophobic Collapse") {
             add(full(combo(listOf("Dilute: protein fills 3% of the space", "Crowded: 12%", "Cell-like: 25%, as in cytoplasm"), s.crowding) { update(s.copy(crowding = it)) }))
 
             section("Experiments")
+            add(check("Start from the gene (DNA → RNA → protein)", s.fromGene) { update(s.copy(fromGene = it)) })
+            add(note("Watch a protein being made: RNA polymerase copies its real gene (from the ENA database) into mRNA, then the ribosome reads the mRNA codon by codon, slowing at rare codons, while the chain folds. Designed proteins, which have no gene, get typical codons. Click to skip the copying."))
+            add(gap(6))
             add(check("Grow on a ribosome", s.ribosome) { update(s.copy(ribosome = it)) })
             add(note("Each new protein is made one residue at a time, front end first, as in a real cell, pausing between domains. The first parts fold before the rest exists. About as good as a normal start, and faster for single-domain proteins like lysozyme and myoglobin; two-domain proteins fold less often."))
             add(label("Waiting between domains"))

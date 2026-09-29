@@ -149,7 +149,9 @@ class SettingsActivity : Activity() {
         col.addView(switch("Depth of field and contact sparks", s.effects) { update(s.copy(effects = it)) }, margins(top = 10))
 
         col.addView(section("Experiments"))
-        col.addView(switch("Grow on a ribosome", s.ribosome) { update(s.copy(ribosome = it)) }, margins(top = 6))
+        col.addView(switch("Start from the gene (DNA → RNA → protein)", s.fromGene) { update(s.copy(fromGene = it)) }, margins(top = 6))
+        col.addView(body("Watch a protein being made: RNA polymerase copies its real gene (from the ENA database) into mRNA, then the ribosome reads the mRNA codon by codon, slowing at rare codons, while the chain folds. Designed proteins, which have no gene, get typical codons. Tap to skip the copying.").apply { textSize = 12f }, margins(top = 2))
+        col.addView(switch("Grow on a ribosome", s.ribosome) { update(s.copy(ribosome = it)) }, margins(top = 10))
         col.addView(body("Each new protein is made one residue at a time, front end first, as in a real cell, pausing between domains. The first parts fold before the rest exists. About as good as a normal start, and faster for single-domain proteins like lysozyme and myoglobin; two-domain proteins fold less often.").apply { textSize = 12f }, margins(top = 2))
         col.addView(label("Waiting between domains"), margins(top = 6))
         col.addView(spinner(listOf("Patient: waits until each domain is 90% folded", "Normal: 80%", "Hasty: 70%"), s.ribosomeSpeed) { idx ->

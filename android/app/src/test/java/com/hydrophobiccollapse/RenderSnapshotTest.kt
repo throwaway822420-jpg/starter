@@ -161,6 +161,7 @@ class RenderSnapshotTest {
     fun ribosomeFrames() {
         frame("ribosome-myoglobin.png", Settings(protein = "myoglobin", viewStyle = 1, hud = true), 2, ribosome = true)
         frame("ribosome-hemoglobin.png", Settings(protein = "hemoglobin", viewStyle = 3), 5, ribosome = true)
+        frame("gene-transcription.png", Settings(protein = "ubq", fromGene = true), 4)
         val sim = frame("ribosome-ubiquitin-done.png", Settings(protein = "ubq", viewStyle = 1), 40, ribosome = true)
         assertTrue("translation finishes", !sim.eng.translating && sim.eng.released == sim.eng.n)
     }

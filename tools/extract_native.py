@@ -97,4 +97,5 @@ def main():
           'internal object NativeStructures {\n    val encoded: Map<String, Pair<String, String>> = mapOf(\n' + '\n'.join(lines) + '\n    )\n}\n')
     open('android/core/src/main/java/com/hydrophobiccollapse/NativeStructures.kt', 'w', encoding='utf-8', newline='\n').write(kt)
 
-main()
+if __name__ == '__main__':
+    main()

@@ -112,6 +112,7 @@ private const val RIBO_STEPS = 50
 private val GATE_Q = doubleArrayOf(0.9, 0.8, 0.7)
 private val GATE_MAX = intArrayOf(60_000, 40_000, 20_000)
 private const val GATE_CHECK = 100
+private const val MIN_DWELL = 30           // fastest codon, steps: quicker pushes the chain out faster than it can move
 
 const val AMINO_ACIDS = "ARNDCQEGHILKMFPSTWYV"
 private const val MAX_SIG = 0.9 * 2 * 3.5
@@ -315,6 +316,20 @@ class ProteinEngine {
     private var riboChain = 0                  // the chain being made
     private var riboHead = 0                   // index one past the newest residue; runs past the chain's end while it is pushed out
     private var riboDwell = 1                  // steps the current residue takes
+    /**
+     * Relative time over each residue's codon (mean 1 per chain), from its gene; read by load(). With it the
+     * ribosome reads codon by codon, slowing at rare ones, and doesn't wait at domain boundaries.
+     */
+    var codonSlowness: DoubleArray? = null
+    /** Index one past the newest residue while translating (the residue being added is this one), else −1. */
+    val ribosomeHead get() = if (translating) riboHead else -1
+    /** The chain being made while translating. */
+    val ribosomeChain get() = riboChain
+    /** Steps the ribosome takes over residue i. */
+    private fun dwellFor(i: Int): Int {
+        val w = codonSlowness?.getOrNull(i) ?: return RIBO_STEPS
+        return (RIBO_STEPS * w).roundToInt().coerceAtLeast(MIN_DWELL)
+    }
     /** True while the ribosome waits at a domain boundary for the part already made to fold. */
     var riboWaiting = false; private set
     private var gateSteps = 0
@@ -431,7 +446,7 @@ class ProteinEngine {
     private fun startChain() {
         riboHead = chainStart[riboChain] + 1
         made = riboHead
-        riboDwell = RIBO_STEPS; riboWaiting = false
+        riboDwell = dwellFor(riboHead); riboWaiting = false
         listsValid = false
         placeTunnel()
     }
@@ -479,7 +494,7 @@ class ProteinEngine {
                 log("Ribosome: making chain ${chainLetter(riboChain)}")
                 return
             }
-            riboDwell = RIBO_STEPS
+            riboDwell = if (riboHead < end) dwellFor(riboHead) else RIBO_STEPS
             // At a domain boundary, wait for what is out to fold before making more
             if (riboHead < end && pauseBefore[riboHead]) {
                 riboWaiting = true; gateSteps = 0
@@ -519,7 +534,8 @@ class ProteinEngine {
     private fun planPauses() {
         pauseBefore = BooleanArray(n)
         val cuts = ArrayList<Int>()
-        if (nNat > 0) for (c in 0 until nChains) {
+        // With real codons the pauses come from them instead
+        if (nNat > 0 && codonSlowness == null) for (c in 0 until nChains) {
             val s0 = chainStart[c]; val len = chainStart[c + 1] - s0
             if (len < 2 * MIN_DOMAIN) continue
             // cross[p]: native contacts from residues before the cut at p to residues at or after it

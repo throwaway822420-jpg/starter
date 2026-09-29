@@ -45,24 +45,6 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
     // It is fair: a waiting frame gets its turn after the current batch of steps.
     private val lock = ReentrantLock(true)
 
-    // ---------- Colours (same palette as the web version) ----------
-    private object Col {
-        const val INK = 0xFF0A0F1D.toInt()
-        const val INK_EDGE = 0xFF04060C.toInt()
-        const val PANEL = 0xC20D1324.toInt()
-        const val LINE = 0x29A0B0D6
-        const val TEXT = 0xFFE4E8F3.toInt()
-        const val HAZE = 0xFF8A94B0.toInt()
-        const val HYDRO = 0xFFF0A44B.toInt()
-        const val POLAR = 0xFF74CFC0.toInt()
-        const val POS = 0xFF8EA2FF.toInt()
-        const val NEG = 0xFFFF7D8E.toInt()
-        const val SULFUR = 0xFFF3D34A.toInt()
-        const val SPECIAL = 0xFF9AA3B8.toInt()
-        const val HELIX = 0xFFC4B1FF.toInt()
-        const val STRAND = 0xFF9FE3A8.toInt()
-        const val BOND = 0xFF5D6784.toInt()
-    }
     // Bold, distinct chain colours; one chain is coloured as a rainbow from N (blue) to C (red)
     private val chainPalette = intArrayOf(0xFFFF6B6B.toInt(), 0xFF4DABF7.toInt(), 0xFFFFD43B.toInt(), 0xFF51CF66.toInt(),
         0xFFCC5DE8.toInt(), 0xFFFF922B.toInt(), 0xFF22B8CF.toInt(), 0xFFF06595.toInt())
@@ -77,14 +59,7 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
     private fun colourByChain() = when (settings.colorBy) { 1 -> false; 2 -> true; else -> eng.nChains > 1 }
     /** The colour a residue is drawn in: its chemistry, or its chain. */
     private fun drawColor(i: Int, byChain: Boolean) = if (byChain) chainCol[i] else residueColor(i)
-    private fun withAlpha(c: Int, a: Float) = (c and 0xFFFFFF) or ((a.coerceIn(0f, 1f) * 255).roundToInt() shl 24)
-    private fun mix(a: Int, b: Int, t: Float): Int {
-        val r = ((a shr 16 and 255) + ((b shr 16 and 255) - (a shr 16 and 255)) * t).roundToInt()
-        val g = ((a shr 8 and 255) + ((b shr 8 and 255) - (a shr 8 and 255)) * t).roundToInt()
-        val bl = ((a and 255) + ((b and 255) - (a and 255)) * t).roundToInt()
-        return (0xFF shl 24) or (r shl 16) or (g shl 8) or bl
-    }
-    private val hydrophobic = "AVLIMFW"
+    private val hydrophobic = HYDROPHOBIC
     private fun residueColor(i: Int): Int {
         val aa = eng.seq[i]; val q = snapQ[i]
         return when {
@@ -134,10 +109,10 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         eng.crowding = s.crowding
         eng.assist = s.assist; eng.urea = s.urea.toDouble(); eng.pullPN = s.pullPN.toDouble()
         eng.chaperone = s.chaperone
-        eng.ribosome = s.ribosome; eng.ribosomeSpeed = s.ribosomeSpeed
+        eng.ribosome = s.ribosome || s.fromGene; eng.ribosomeSpeed = s.ribosomeSpeed
         val reload = when {
             !loaded -> true
-            old.ribosome != s.ribosome -> true
+            old.ribosome != s.ribosome || old.fromGene != s.fromGene -> true
             s.protein == Proteins.RANDOM_ID -> old.protein != s.protein || old.randomLength != s.randomLength || old.randomStyle != s.randomStyle
             else -> Proteins.byId(s.protein, s.customJson).signature != protein.signature || old.protein != s.protein
         }
@@ -153,6 +128,16 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         protein = if (settings.protein == Proteins.RANDOM_ID) Proteins.random(settings.randomLength, settings.randomStyle)
                   else Proteins.byId(settings.protein, settings.customJson)
         eng.temperature = hotT()
+        // From the gene: codon-timed translation after transcription has played
+        val g = if (settings.fromGene) Gene.forProtein(protein) else null
+        eng.codonSlowness = g?.let { gene -> DoubleArray(protein.length).also { out ->
+            var k = 0
+            for (ch in gene.chains) for (v in ch.slowness) out[k++] = v
+        } }
+        eng.ribosome = settings.ribosome || g != null
+        geneScene = g?.let { GeneScene(it, density) }
+        transcribing = geneScene != null
+        stripAlpha = 0.0
         eng.load(protein)
         val n = eng.n
         px = FloatArray(n); py = FloatArray(n); pz = DoubleArray(n); pr = FloatArray(n); ps = FloatArray(n)
@@ -194,6 +179,8 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
     private val snapTranslating get() = snapReleased < eng.n
     private var snapElongation = 0.0
     private var snapRiboWaiting = false
+    private var snapRiboChain = 0             // for the translation strip: chain being made…
+    private var snapRiboResidue = 0           // …and the residue being added in it
     private fun ensureSnapArrays(n: Int) {
         if (snapX.size != n) { snapX = DoubleArray(n); snapY = DoubleArray(n); snapZ = DoubleArray(n); snapQ = DoubleArray(n); snapSS = IntArray(n) }
     }
@@ -208,6 +195,7 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         snapCagePhase = eng.cagePhase; snapCageProgress = eng.cageProgress
         snapCageR = eng.cageRadius; snapCageH = eng.cageHalfHeight
         snapMade = eng.made; snapReleased = eng.released; snapElongation = eng.elongation; snapRiboWaiting = eng.riboWaiting
+        if (eng.translating) { snapRiboChain = eng.ribosomeChain; snapRiboResidue = eng.ribosomeHead - eng.chainStart[snapRiboChain] }
         shownProgress = progress
     }
 
@@ -231,7 +219,7 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         val me = Thread.currentThread()
         var batch = 10
         while (physicsThread === me) {
-            if (replaying) { java.util.concurrent.locks.LockSupport.parkNanos(5_000_000L); continue }
+            if (replaying || transcribing) { java.util.concurrent.locks.LockSupport.parkNanos(5_000_000L); continue }
             lock.lock()
             try {
                 if (physicsThread !== me) break
@@ -296,8 +284,10 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         var extent = max(2.2 * eng.rg, 16.0)
         if (eng.cagePhase != CAGE_OFF) extent = max(extent, 1.25 * eng.cageHalfHeight)
         if (riboAlpha > 0.5) extent = max(extent, abs(view[1] - eng.exitY) + 18)
-        return min(w, h) * 0.42 / extent * userZoom
+        return min(w, h) * 0.42 * (1 - 0.18 * stripAlpha) / extent * userZoom
     }
+    /** Screen y of the view centre: raised while the translation strip takes the bottom of the screen. */
+    private fun midY() = (h / 2 - stripAlpha * dp(80f)).toFloat()
     /** Turn the molecule (drag, arrow keys). */
     fun rotateBy(dYaw: Double, dPitch: Double) = lock.withLock { yaw += dYaw; pitch = (pitch + dPitch).coerceIn(-1.3, 1.3) }
     /** Zoom in (factor > 1) or out, on top of the automatic fit. */
@@ -316,14 +306,14 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
             val x1 = cy * dx + sy * dz; val z1 = -sy * dx + cy * dz
             val y2 = cp * dy - sp * z1; val z2 = sp * dy + cp * z1
             val s = zoom * cam / max(cam - z2, cam * 0.2)
-            px[i] = (w / 2 + x1 * s).toFloat(); py[i] = (h / 2 + y2 * s).toFloat(); pz[i] = z2; ps[i] = s.toFloat()
+            px[i] = (w / 2 + x1 * s).toFloat(); py[i] = (midY() + y2 * s).toFloat(); pz[i] = z2; ps[i] = s.toFloat()
             pr[i] = (eng.radius(i) * 0.5 * s).toFloat()
         }
     }
     private fun unproject(sx: Float, sy: Float, z2: Double, out: DoubleArray) {
         val cam = cam()
         val s = zoom * cam / max(cam - z2, cam * 0.2)
-        val x1 = (sx - w / 2) / s; val y2 = (sy - h / 2) / s
+        val x1 = (sx - w / 2) / s; val y2 = (sy - midY()) / s
         val a = yaw + pageYaw
         val cy = cos(a); val syw = sin(a); val cp = cos(pitch); val sp = sin(pitch)
         val dy = cp * y2 + sp * z2; val z1 = -sp * y2 + cp * z2
@@ -386,6 +376,14 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
             // The engine waits while a recording plays; the camera and the water keep moving
             updateReplay(dt)
             if (replaying) { updateCamera(dt); updateSolvent(dt); return@withLock }
+        }
+        if (transcribing) {
+            // The gene is being copied: the protein doesn't exist yet, so the engine waits
+            val gs = geneScene
+            gs?.update(dt * settings.speed.toDouble().coerceIn(0.25, 4.0))
+            if (gs == null || gs.done) { transcribing = false; foldStart = eng.time; note("mRNA ready: translation starts") }
+            updateSolvent(dt)
+            return@withLock
         }
         updateSchedule(dt)
         eng.advanceClock(dt)
@@ -450,6 +448,7 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         zoom += (fitZoom() - zoom) * min(1.0, dt * 1.2)
         // The ribosome fades out once the last chain has left it
         riboAlpha += ((if (snapTranslating) 1.0 else 0.0) - riboAlpha) * min(1.0, dt * 0.8)
+        stripAlpha += ((if (snapTranslating && geneScene != null) 1.0 else 0.0) - stripAlpha) * min(1.0, dt * 2.0)
         if (downId < 0 && !(replaying && replayPaused)) yaw += dt * 0.12
         pageYaw += (pageYawTarget - pageYaw) * min(1.0, dt * 4)
     }
@@ -468,7 +467,7 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
     /** Seconds of simulation recorded so far (a replay needs a couple). */
     val recordedSeconds get() = recording.seconds
     fun startReplay(): Boolean = lock.withLock {
-        if (!loaded || recording.size < 8) return@withLock false
+        if (!loaded || transcribing || recording.size < 8) return@withLock false
         replaying = true; replayPos = 0.0; replayPaused = false; scrubbing = false
         eng.grab = -1; selected = -1; selectedInfo = null; sparks.clear()
         showReplayFrame()
@@ -624,6 +623,8 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
             c.drawCircle(r[0].toFloat(), r[1].toFloat(), ((8 + age * 60) * density).toFloat(), stroke)
         }
         if (!loaded) return
+        val gs = geneScene
+        if (transcribing && gs != null) { gs.draw(c, w, h, topInset, bottomInset); return }
         val n = eng.n
         val big = n > 600
         project()
@@ -683,6 +684,10 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         if (settings.showProgress) drawProgress(c)
         if (!replaying) selectedInfo?.let { if (selected in 0 until n) drawInspector(c, it) }
         if (replaying) drawReplayBar(c)
+        else if (gs != null && stripAlpha > 0.01) {
+            val y0 = h - bottomInset - (if (wallpaperMode) dp(110f) else dp(16f)) - gs.stripHeight
+            gs.drawTranslation(c, w, y0, snapRiboChain, snapRiboResidue, snapElongation, stripAlpha.toFloat())
+        }
     }
 
     /** Optical tweezers: arrows on the two pulled ends, and how far apart they are. */
@@ -777,7 +782,7 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         val pct = (progress * 100).roundToInt()
         text.textAlign = Paint.Align.LEFT; text.typeface = sans; text.textSize = dp(11f); text.color = Col.HAZE; text.letterSpacing = 0.04f
         val label = if (snapRiboWaiting) "Ribosome waits · domain folding"
-                    else if (snapTranslating) "Ribosome · ${snapMade} of ${eng.n} made"
+                    else if (snapTranslating) "Ribosome · ${snapMade}/${eng.n}"
                     else (if (progressIsFolding) "Folded" else "Collapsed") + (if (settings.assist > 0) " · assisted" else "")
         c.drawText(ellipsize(label, pw - dp(70f)), x0 + dp(12f), y0 + dp(15f), text)
         text.letterSpacing = 0f
@@ -898,7 +903,7 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         val x1 = cy * dx + sy * dz; val z1 = -sy * dx + cy * dz
         val y2 = cp * dy - sp * z1; val z2 = sp * dy + cp * z1
         val s = zoom * cam / max(cam - z2, cam * 0.2)
-        tpx = (w / 2 + x1 * s).toFloat(); tpy = (h / 2 + y2 * s).toFloat(); tpz = z2; tps = s.toFloat()
+        tpx = (w / 2 + x1 * s).toFloat(); tpy = (midY() + y2 * s).toFloat(); tpz = z2; tps = s.toFloat()
     }
     /** How squarely a direction points at the viewer, 0…1. */
     private fun facing(vx: Double, vy: Double, vz: Double): Float {
@@ -1091,6 +1096,13 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
             fill.color = withAlpha(0xFFFFFF, life); c.drawCircle(x, y, dp(0.6f) + dp(1.8f) * life, fill)
         }
     }
+
+    // ---------- Gene → protein: transcription first, then a strip showing the codons being read ----------
+    private var geneScene: GeneScene? = null
+    @Volatile private var transcribing = false
+    private var stripAlpha = 0.0
+    /** True while the gene is being transcribed (before the protein exists). */
+    val isTranscribing get() = transcribing
 
     // ---------- Ribosome ----------
     private var riboAlpha = 0.0
@@ -1450,6 +1462,7 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
     }
     private fun onTouchLocked(e: PointerEvent): Boolean {
         if (!loaded) return false
+        if (transcribing) { if (e.actionMasked == PointerEvent.ACTION_UP) geneScene?.skip(); return true }
         when (e.actionMasked) {
             PointerEvent.ACTION_DOWN -> {
                 downId = e.getPointerId(0)
