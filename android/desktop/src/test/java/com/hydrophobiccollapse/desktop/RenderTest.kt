@@ -32,7 +32,7 @@ class RenderTest {
         val sim = Simulation(1.5f, wallpaperMode = false)
         sim.resize(1600, 1000)
         sim.applySettings(Settings(protein = "myoglobin", viewStyle = 1, hud = true, ribosome = true))
-        repeat(150) { sim.update(1.0 / 30) }
+        repeat(60) { sim.update(1.0 / 30) }
         val img = BufferedImage(1600, 1000, BufferedImage.TYPE_INT_ARGB)
         val g = img.createGraphics()
         sim.draw(Java2DCanvas(g)); g.dispose(); sim.release()

@@ -11,6 +11,7 @@ import kotlin.math.ln
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
+import kotlin.math.roundToInt
 import kotlin.math.sign
 import kotlin.math.sin
 import kotlin.math.sqrt
@@ -100,12 +101,17 @@ private const val K_RIBO_WALL = 5.0        // the ribosome's surface, kcal/(mol�
 // Residues this close to the tunnel mouth already take up room (and can touch the free chain), so nothing is
 // sitting where they come out
 private const val MOUTH_SLOTS = 3
-// Pauses at domain boundaries: domains are at least this long, the ribosome waits this many residues' time, and a
-// cut counts as a boundary when the contacts across it are below this share of what a cut through a domain has
+// Pauses at domain boundaries: domains are at least this long, and a cut counts as a boundary when the contacts
+// across it are below this share of what a cut through a domain has
 private const val MIN_DOMAIN = 40
-private const val PAUSE_FACTOR = 60
 private const val DOMAIN_SCORE = 0.12
-private val RIBO_STEPS = intArrayOf(400, 150, 50)   // simulation steps per residue added: slow, normal, fast
+// The ribosome runs fast (steps per residue; slower rams the chain no less but wastes time) and, at each domain
+// boundary, waits until the part already made has formed this share of its native contacts (slow, normal, fast
+// setting), or until the time limit (steps) runs out
+private const val RIBO_STEPS = 50
+private val GATE_Q = doubleArrayOf(0.9, 0.8, 0.7)
+private val GATE_MAX = intArrayOf(60_000, 40_000, 20_000)
+private const val GATE_CHECK = 100
 
 const val AMINO_ACIDS = "ARNDCQEGHILKMFPSTWYV"
 private const val MAX_SIG = 0.9 * 2 * 3.5
@@ -290,7 +296,7 @@ class ProteinEngine {
      * exist yet (they wait, parked and ignored, at the tunnel's inner end).
      */
     var ribosome = false
-    /** How fast residues are added: 0 slow, 1 normal, 2 fast. */
+    /** How long it waits at domain boundaries: 0 slow (until well folded), 1 normal, 2 fast. */
     var ribosomeSpeed = 1
         set(v) { field = v.coerceIn(0, 2) }
     /** True until the last chain has fully left the tunnel. */
@@ -309,6 +315,9 @@ class ProteinEngine {
     private var riboChain = 0                  // the chain being made
     private var riboHead = 0                   // index one past the newest residue; runs past the chain's end while it is pushed out
     private var riboDwell = 1                  // steps the current residue takes
+    /** True while the ribosome waits at a domain boundary for the part already made to fold. */
+    var riboWaiting = false; private set
+    private var gateSteps = 0
 
     // Known structure (PDB or AlphaFold) and how strongly to steer toward it, 0…1
     var nativeBias = 1.0
@@ -422,7 +431,7 @@ class ProteinEngine {
     private fun startChain() {
         riboHead = chainStart[riboChain] + 1
         made = riboHead
-        riboDwell = dwellSteps(riboHead)
+        riboDwell = RIBO_STEPS; riboWaiting = false
         listsValid = false
         placeTunnel()
     }
@@ -437,6 +446,16 @@ class ProteinEngine {
     }
     /** One step of translation: slide the tunnel's chain out, and add a residue each time it moves a whole slot. */
     private fun translate() {
+        if (riboWaiting) {
+            gateSteps++
+            if (gateSteps % GATE_CHECK != 0) return
+            val q = madeFraction()
+            val timeUp = gateSteps >= GATE_MAX[ribosomeSpeed]
+            if (q < GATE_Q[ribosomeSpeed] && !timeUp) return
+            riboWaiting = false
+            log(if (timeUp) "Ribosome moves on: time's up (${(q * 100).roundToInt()} % folded)"
+                else "Domain folded (${(q * 100).roundToInt()} %): ribosome moves on")
+        }
         elongation += 1.0 / riboDwell
         if (elongation >= 1) {
             elongation = 0.0
@@ -460,27 +479,36 @@ class ProteinEngine {
                 log("Ribosome: making chain ${chainLetter(riboChain)}")
                 return
             }
-            // Once the chain is complete, the rest slides out at the base pace (faster rams the free chain into itself)
-            riboDwell = if (riboHead < end) dwellSteps(riboHead) else RIBO_STEPS[ribosomeSpeed]
+            riboDwell = RIBO_STEPS
+            // At a domain boundary, wait for what is out to fold before making more
+            if (riboHead < end && pauseBefore[riboHead]) {
+                riboWaiting = true; gateSteps = 0
+                log("Ribosome waits for the domain to fold")
+            }
         }
         placeTunnel()
     }
 
     /**
-     * Simulation steps the ribosome takes to add residue i (2000 steps are one second at 1× speed). Real
-     * ribosomes don't run at a steady pace: they slow down at rare codons, and those pauses often sit between
-     * domains, giving the finished part time to fold before the next part comes out.
+     * Share of the native contacts within the current chain's free part that have formed. Real ribosomes don't
+     * run at a steady pace: they slow down at rare codons, often between domains, giving the finished part time to
+     * fold before the next comes out. Here the pause lasts exactly until it has folded.
      */
-    private fun dwellSteps(i: Int): Int {
-        val base = RIBO_STEPS[ribosomeSpeed]
-        if (i < pauseBefore.size && pauseBefore[i]) {
-            log("Ribosome pauses: a domain has left the tunnel")
-            return base * PAUSE_FACTOR
+    private fun madeFraction(): Double {
+        val c = riboChain; val rel = released
+        var total = 0; var formed = 0
+        for (k in 0 until nNat) {
+            val a = ncI[k]; val b = ncJ[k]
+            if (chainOf[a] != c || chainOf[b] != c || b >= rel) continue
+            total++
+            val r0 = ncR[k] * 1.2
+            val dx = x[a] - x[b]; val dy = y[a] - y[b]; val dz = z[a] - z[b]
+            if (dx * dx + dy * dy + dz * dz < r0 * r0) formed++
         }
-        return base
+        return if (total == 0) 1.0 else formed.toDouble() / total
     }
 
-    /** Where the ribosome pauses: residues it waits before adding, each just after a domain clears the tunnel. */
+    /** Where the ribosome waits: residues it holds back, each just after a domain has cleared the tunnel. */
     private var pauseBefore = BooleanArray(0)
     /** Domain boundaries found in the known structure, as residue indices (the first residue after each cut). */
     var domainCuts: List<Int> = emptyList(); private set

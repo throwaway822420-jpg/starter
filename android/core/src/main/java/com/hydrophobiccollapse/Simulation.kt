@@ -193,6 +193,7 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
     private var snapReleased = 0              // residues out of the ribosome tunnel
     private val snapTranslating get() = snapReleased < eng.n
     private var snapElongation = 0.0
+    private var snapRiboWaiting = false
     private fun ensureSnapArrays(n: Int) {
         if (snapX.size != n) { snapX = DoubleArray(n); snapY = DoubleArray(n); snapZ = DoubleArray(n); snapQ = DoubleArray(n); snapSS = IntArray(n) }
     }
@@ -206,7 +207,7 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         snapFlashes = ArrayList(eng.flashes); snapEvents = ArrayList(eng.events)
         snapCagePhase = eng.cagePhase; snapCageProgress = eng.cageProgress
         snapCageR = eng.cageRadius; snapCageH = eng.cageHalfHeight
-        snapMade = eng.made; snapReleased = eng.released; snapElongation = eng.elongation
+        snapMade = eng.made; snapReleased = eng.released; snapElongation = eng.elongation; snapRiboWaiting = eng.riboWaiting
         shownProgress = progress
     }
 
@@ -530,7 +531,7 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         snapCagePhase = near.cagePhase
         snapCageProgress = (if (a.cagePhase == b.cagePhase) a.cageProgress + (b.cageProgress - a.cageProgress) * t else near.cageProgress).toDouble()
         snapCageR = eng.cageRadiusFor(snapCagePhase); snapCageH = 1.15 * snapCageR
-        snapMade = near.made; snapReleased = near.released; snapElongation = 0.0
+        snapMade = near.made; snapReleased = near.released; snapElongation = 0.0; snapRiboWaiting = false
         temperature = (a.temperature + (b.temperature - a.temperature) * t).toDouble()
         shownProgress = (a.progress + (b.progress - a.progress) * t).toDouble()
         if (snapCagePhase != CAGE_OFF) replayCenter.fill(0.0)
@@ -775,7 +776,8 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         val progress = shownProgress
         val pct = (progress * 100).roundToInt()
         text.textAlign = Paint.Align.LEFT; text.typeface = sans; text.textSize = dp(11f); text.color = Col.HAZE; text.letterSpacing = 0.04f
-        val label = if (snapTranslating) "Ribosome · ${snapMade} of ${eng.n} made"
+        val label = if (snapRiboWaiting) "Ribosome waits · domain folding"
+                    else if (snapTranslating) "Ribosome · ${snapMade} of ${eng.n} made"
                     else (if (progressIsFolding) "Folded" else "Collapsed") + (if (settings.assist > 0) " · assisted" else "")
         c.drawText(ellipsize(label, pw - dp(70f)), x0 + dp(12f), y0 + dp(15f), text)
         text.letterSpacing = 0f

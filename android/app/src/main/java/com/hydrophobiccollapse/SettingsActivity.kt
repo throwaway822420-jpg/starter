@@ -151,8 +151,8 @@ class SettingsActivity : Activity() {
         col.addView(section("Experiments"))
         col.addView(switch("Grow on a ribosome", s.ribosome) { update(s.copy(ribosome = it)) }, margins(top = 6))
         col.addView(body("Each new protein is made one residue at a time, front end first, as in a real cell, pausing between domains. The first parts fold before the rest exists. Fun to watch, and it helps all-helix proteins like myoglobin, but most proteins fold a little faster without it.").apply { textSize = 12f }, margins(top = 2))
-        col.addView(label("Ribosome speed"), margins(top = 6))
-        col.addView(spinner(listOf("Slow: more time to fold on the way", "Normal", "Fast"), s.ribosomeSpeed) { idx ->
+        col.addView(label("Waiting between domains"), margins(top = 6))
+        col.addView(spinner(listOf("Patient: waits until each domain is 90% folded", "Normal: 80%", "Hasty: 70%"), s.ribosomeSpeed) { idx ->
             if (idx != s.ribosomeSpeed) update(s.copy(ribosomeSpeed = idx))
         }, margins(top = 4))
         col.addView(switch("Chaperone cage (GroEL)", s.chaperone) { update(s.copy(chaperone = it)) }, margins(top = 10))

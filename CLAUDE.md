@@ -106,16 +106,19 @@ The model is a coarse-grained Cα chain. Units are Å, kcal/mol, K and ps-ish ti
   (drawn at the top of the screen). Phases CAGE_CAPTURE 3 s (hydrophobic lining well + pull of the chain into the cage),
   CAGE_ENCLOSED 8 s (lid on, polar walls, cavity ×1.1), CAGE_RELEASE 2.5 s (push toward −y). The clock is `advanceClock`,
   i.e. wall time. Camera centres on the cage while it is on.
-- **Ribosome mode** (`Settings.ribosome`, default off; `ribosomeSpeed` 0–2 → 400/150/50 steps per residue): `load()`
+- **Ribosome mode** (`Settings.ribosome`, default off; `ribosomeSpeed` 0–2 → how folded a domain must be before moving on, Q 0.9/0.8/0.7): `load()`
   starts the chain N-terminus first out of a 30-residue exit tunnel at `exitY = −0.5·rBox` (tunnel runs along −y,
   drawn at the top). Residues `[0, released)` are free; `[released, made)` are pinned in zigzag tunnel slots and slide
   out with `elongation`; the rest are parked and ignored. Multi-chain proteins are made one chain after another.
   Only free residues (plus the `MOUTH_SLOTS` nearest the mouth) enter the neighbour lists; bonded terms need one free
   residue; no centre pull while translating (it stretched the chain); cage/tweezers wait. Termination slides the
-  tail out at the base pace: faster rammed the free chain and tore bonds. `planPauses()` finds domain
-  boundaries in the native contact map (few contacts across a cut) and the ribosome pauses 60× once a domain clears
-  the tunnel. Fair 6-seed survey (fixed bar, translation time counted): normal start folded 17/30, ribosome 13/30 and
-  slower. Only all-helix myoglobin clearly gains. So it's an experiment, not a folding aid.
+  tail out at the base pace: faster rammed the free chain and tore bonds. The ribosome runs at 50 steps per residue;
+  `planPauses()` finds domain boundaries in the native contact map (few contacts across a cut), and once a domain
+  clears the tunnel the ribosome waits (`riboWaiting`) until the free part reaches the Q threshold or a time limit.
+  Fair 6-seed survey (fixed bar, translation time counted) on ubq/lysozyme/myoglobin/calmodulin/T4L: normal start
+  17/30, first version (150 steps/residue, fixed 60× pauses) 13/30, current version 17/30. The current version is as
+  good or faster on single-domain proteins; worse on T4L and calmodulin, whose gates don't help (T4L's N-terminal
+  helix belongs to its C-domain; calmodulin's lobes fold but mis-orient). Still off by default.
   Recording frames store `made`/`released`. The render tests pin `ribosome = false` except the ribosome frames.
 - **Time-lapse replay:** `Recording` keeps a frame every 0.25 s (2 min, less for huge proteins). During a replay the engine
   and Extreme thread wait; `showReplayFrame` interpolates into the snapshot arrays; drag rotates (also in wallpaperMode),
