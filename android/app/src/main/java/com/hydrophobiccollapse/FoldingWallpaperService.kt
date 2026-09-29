@@ -44,6 +44,7 @@ class FoldingWallpaperService : WallpaperService() {
             prefs.unregisterOnSharedPreferenceChangeListener(this)
             try { unregisterReceiver(screenOn) } catch (e: IllegalArgumentException) { }
             stop()
+            sim.release()
             super.onDestroy()
         }
 
@@ -71,16 +72,18 @@ class FoldingWallpaperService : WallpaperService() {
         private fun start() {
             if (!hasSurface) return
             lastNs = 0L
+            sim.setActive(true)
             Choreographer.getInstance().removeFrameCallback(this)
             Choreographer.getInstance().postFrameCallback(this)
         }
-        private fun stop() = Choreographer.getInstance().removeFrameCallback(this)
+        private fun stop() { sim.setActive(false); Choreographer.getInstance().removeFrameCallback(this) }
 
         override fun doFrame(frameTimeNanos: Long) {
             if (!visible || !hasSurface) return
             Choreographer.getInstance().postFrameCallback(this)
             val power = getSystemService(POWER_SERVICE) as PowerManager
-            val slow = sim.settings.saver || power.isPowerSaveMode
+            // Extreme mode also draws at 30 fps, leaving more of the CPU for folding
+            val slow = sim.settings.lowFrameRate() || power.isPowerSaveMode
             if (lastNs != 0L && slow && frameTimeNanos - lastNs < 32_000_000L) return
             val dt = if (lastNs == 0L) 1.0 / 60 else (frameTimeNanos - lastNs) / 1e9
             lastNs = frameTimeNanos
@@ -102,6 +105,12 @@ class FoldingWallpaperService : WallpaperService() {
         }
 
         override fun onTouchEvent(event: MotionEvent) { sim.onTouch(event) }
+
+        override fun onApplyWindowInsets(insets: android.view.WindowInsets) {
+            super.onApplyWindowInsets(insets)
+            @Suppress("DEPRECATION")
+            sim.topInset = insets.systemWindowInsetTop.toFloat()
+        }
 
         override fun onOffsetsChanged(xOffset: Float, yOffset: Float, xStep: Float, yStep: Float, xPixels: Int, yPixels: Int) {
             sim.setPageOffset(xOffset)

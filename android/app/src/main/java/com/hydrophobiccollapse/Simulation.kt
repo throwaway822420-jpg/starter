@@ -8,6 +8,8 @@ import android.graphics.RadialGradient
 import android.graphics.Shader
 import android.graphics.Typeface
 import android.view.MotionEvent
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.ceil
@@ -33,6 +35,11 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
     private var w = 1f
     private var h = 1f
     var bottomInset = 0f
+    var topInset = 0f
+
+    // Everything touching the engine holds this lock, so Extreme mode's physics thread and the display never overlap.
+    // It is fair: a waiting frame gets its turn after the current batch of steps.
+    private val lock = ReentrantLock(true)
 
     // ---------- Colours (same palette as the web version) ----------
     private object Col {
@@ -75,7 +82,7 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
     }
     private val hydrophobic = "AVLIMFW"
     private fun residueColor(i: Int): Int {
-        val aa = eng.seq[i]; val q = eng.charge[i]
+        val aa = eng.seq[i]; val q = snapQ[i]
         return when {
             aa == 'C' -> Col.SULFUR
             q > 0.5 -> Col.POS
@@ -95,9 +102,9 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
     private fun setPhase(p: Phase) {
         phase = p; phaseT = 0.0
         if (p == Phase.HEAT) { bestE = 0.0; note("Heating to ${hotT().roundToInt()} K") }
-        if (p == Phase.COOL) note("Cooling to ${settings.temp} K")
+        if (p == Phase.COOL) { note("Cooling to ${settings.temp} K"); foldStart = eng.time; foldedNoted = false }
     }
-    fun heat() { if (phase == Phase.FOLD || phase == Phase.COOL) setPhase(Phase.HEAT) }
+    fun heat() = lock.withLock { if (phase == Phase.FOLD || phase == Phase.COOL) setPhase(Phase.HEAT) }
     private fun updateSchedule(dt: Double) {
         phaseT += dt
         val lo = settings.temp.toDouble(); val hi = hotT()
@@ -115,7 +122,7 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
     }
 
     // ---------- Settings / loading ----------
-    fun applySettings(s: Settings) {
+    fun applySettings(s: Settings) = lock.withLock {
         val old = settings
         settings = s
         eng.pH = s.ph.toDouble(); eng.saltMM = s.salt.toDouble(); eng.redox = s.redox.toDouble()
@@ -127,11 +134,12 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
             else -> Proteins.byId(s.protein, s.customJson).signature != protein.signature || old.protein != s.protein
         }
         if (reload) load()
+        syncPhysicsThread()
     }
     /** Start again from an unfolded chain; in random mode, with a brand-new protein. */
-    fun reset() = load()
+    fun reset() = lock.withLock { load(); syncPhysicsThread() }
     /** Called when the screen turns on. */
-    fun onScreenOn() { if (settings.protein == Proteins.RANDOM_ID && settings.randomOnWake) load() }
+    fun onScreenOn() = lock.withLock { if (settings.protein == Proteins.RANDOM_ID && settings.randomOnWake) { load(); syncPhysicsThread() } }
     private fun load() {
         protein = if (settings.protein == Proteins.RANDOM_ID) Proteins.random(settings.randomLength, settings.randomStyle)
                   else Proteins.byId(settings.protein, settings.customJson)
@@ -146,7 +154,76 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         for (k in 0..2) view[k] = eng.center[k]
         zoom = fitZoom()
         setPhase(Phase.HOT); phaseT = 3.0
+        // Progress is measured from this unfolded start
+        q0 = if (eng.q.isNaN()) 0.0 else min(eng.q, 0.6); r0 = if (eng.rmsd.isNaN()) 20.0 else max(eng.rmsd, 6.0); rg0 = eng.rg
+        progress = 0.0; foldedNoted = false; foldStart = eng.time
+        takeSnapshot()
         loaded = true
+    }
+
+    // ---------- Snapshot of what the physics thread changes, for drawing ----------
+    private var snapX = DoubleArray(0); private var snapY = DoubleArray(0); private var snapZ = DoubleArray(0)
+    private var snapQ = DoubleArray(0)
+    private var snapFlashes = ArrayList<Flash>()
+    private var snapEvents = ArrayList<ChemEvent>()
+    private fun takeSnapshot() {
+        val n = eng.n
+        if (snapX.size != n) { snapX = DoubleArray(n); snapY = DoubleArray(n); snapZ = DoubleArray(n); snapQ = DoubleArray(n) }
+        System.arraycopy(eng.x, 0, snapX, 0, n); System.arraycopy(eng.y, 0, snapY, 0, n); System.arraycopy(eng.z, 0, snapZ, 0, n)
+        System.arraycopy(eng.charge, 0, snapQ, 0, n)
+        snapFlashes = ArrayList(eng.flashes); snapEvents = ArrayList(eng.events)
+    }
+
+    // ---------- Extreme performance: a physics thread that never waits for the display ----------
+    private var active = false
+    @Volatile private var physicsThread: Thread? = null
+    private var threadSteps = 0L
+    private var lastThreadSteps = 0L
+    /** The view calls this when it becomes visible or hidden; Extreme mode only computes while visible. */
+    fun setActive(on: Boolean) = lock.withLock { active = on; syncPhysicsThread() }
+    /** Stop background work for good (the view or wallpaper is going away). */
+    fun release() = lock.withLock { active = false; syncPhysicsThread() }
+    private fun syncPhysicsThread() {
+        val want = active && loaded && settings.performance == 2
+        if (want && physicsThread == null) {
+            threadSteps = 0; lastThreadSteps = 0
+            physicsThread = Thread({ physicsLoop() }, "fold-physics").apply { isDaemon = true; start() }
+        } else if (!want) physicsThread = null        // the loop notices and ends
+    }
+    private fun physicsLoop() {
+        val me = Thread.currentThread()
+        var batch = 10
+        while (physicsThread === me) {
+            lock.lock()
+            try {
+                if (physicsThread !== me) break
+                val t0 = System.nanoTime()
+                eng.step(batch)
+                msPerStep = 0.9 * msPerStep + 0.1 * ((System.nanoTime() - t0) / 1e6 / batch)
+                threadSteps += batch
+                batch = (2.0 / msPerStep).toInt().coerceIn(1, 4000)   // about 2 ms per turn at the lock
+            } finally { lock.unlock() }
+        }
+    }
+
+    // ---------- Folding progress ----------
+    // With a known structure: native contacts formed and closeness to it (RMSD), both measured from the
+    // unfolded start; the lower of the two, so 100 % needs Q ≥ 0.9 and RMSD ≤ 2 Å. Without one, how far the
+    // chain has collapsed toward the typical size of a folded protein that long (Rg ≈ 2.2·N^0.38 Å).
+    private var q0 = 0.0; private var r0 = 20.0; private var rg0 = 20.0
+    /** Smoothed progress, 0…1. */
+    var progress = 0.0; private set
+    private var foldedNoted = false
+    private var foldStart = 0.0
+    val progressIsFolding get() = eng.hasStructure && settings.nativeBias > 0
+    private fun rawProgress(): Double {
+        if (progressIsFolding) {
+            val pq = ((eng.q - q0) / (0.9 - q0)).coerceIn(0.0, 1.0)
+            val pr = if (eng.rmsd.isNaN()) pq else ((r0 - eng.rmsd) / (r0 - 2.0)).coerceIn(0.0, 1.0)
+            return min(pq, pr)
+        }
+        val target = 2.2 * Math.pow(eng.n.toDouble(), 0.38)
+        return if (rg0 <= target) 1.0 else ((rg0 - eng.rg) / (rg0 - target)).coerceIn(0.0, 1.0)
     }
 
     // ---------- Camera ----------
@@ -168,7 +245,7 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         val a = yaw + pageYaw; val cam = cam()
         val cy = cos(a); val sy = sin(a); val cp = cos(pitch); val sp = sin(pitch)
         for (i in 0 until eng.n) {
-            val dx = eng.x[i] - view[0]; val dy = eng.y[i] - view[1]; val dz = eng.z[i] - view[2]
+            val dx = snapX[i] - view[0]; val dy = snapY[i] - view[1]; val dz = snapZ[i] - view[2]
             val x1 = cy * dx + sy * dz; val z1 = -sy * dx + cy * dz
             val y2 = cp * dy - sp * z1; val z2 = sp * dy + cp * z1
             val s = zoom * cam / max(cam - z2, cam * 0.2)
@@ -211,7 +288,7 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         }
     }
 
-    fun resize(width: Int, height: Int) {
+    fun resize(width: Int, height: Int) = lock.withLock {
         w = max(1, width).toFloat(); h = max(1, height).toFloat()
         bg.shader = RadialGradient(w / 2, h * 0.45f, max(w, h) * 0.75f,
             intArrayOf(Col.INK, Col.INK, Col.INK_EDGE), floatArrayOf(0f, 0.45f, 1f), Shader.TileMode.CLAMP)
@@ -234,32 +311,46 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
     /** Simulation steps actually run per second of real time, for the readout. */
     var stepsPerSecond = 0.0; private set
 
-    fun update(dt0: Double) {
-        if (!loaded) return
+    fun update(dt0: Double) = lock.withLock {
+        if (!loaded) return@withLock
         val dt = min(dt0, 0.1)
         clock += dt
         updateSchedule(dt)
         eng.advanceClock(dt)
-        // Aim for 2000 steps per second at 1×, within a per-frame time budget. Big proteins run slower.
-        val budget = if (settings.saver) 6.0 else 10.0
-        stepDebt += settings.speed * 2000 * dt
-        val count = min(floor(stepDebt).toInt(), max(1, (budget / msPerStep).toInt()))
-        stepDebt = min(stepDebt - count, 200.0)
-        if (count > 0) {
-            val t0 = System.nanoTime()
-            eng.step(count)
-            msPerStep = 0.9 * msPerStep + 0.1 * ((System.nanoTime() - t0) / 1e6 / count)
+        if (physicsThread != null) {
+            // Extreme: the physics thread steps as fast as it can; just count what it did
+            val done = threadSteps - lastThreadSteps; lastThreadSteps = threadSteps
+            stepsPerSecond = 0.9 * stepsPerSecond + 0.1 * (done / max(dt, 1e-3))
+        } else {
+            // Aim for 2000 steps per second at 1×, within a per-frame time budget. Big proteins run slower.
+            val budget = if (settings.performance == 0) 6.0 else 10.0
+            stepDebt += settings.speed * 2000 * dt
+            val count = min(floor(stepDebt).toInt(), max(1, (budget / msPerStep).toInt()))
+            stepDebt = min(stepDebt - count, 200.0)
+            if (count > 0) {
+                val t0 = System.nanoTime()
+                eng.step(count)
+                msPerStep = 0.9 * msPerStep + 0.1 * ((System.nanoTime() - t0) / 1e6 / count)
+            }
+            stepsPerSecond = 0.95 * stepsPerSecond + 0.05 * (count / max(dt, 1e-3))
         }
-        stepsPerSecond = 0.95 * stepsPerSecond + 0.05 * (count / max(dt, 1e-3))
         // Full measurement costs one extra force pass; for big proteins do it a few times a second
         measureAcc += dt
-        if (eng.n <= 400 || measureAcc >= 0.25) { eng.measure(); measureAcc = 0.0 } else eng.updateCenter()
+        if (eng.n <= 400 || measureAcc >= 0.25) {
+            eng.measure(); measureAcc = 0.0
+            progress += (rawProgress() - progress) * min(1.0, 0.5 * max(dt, 0.25))
+            if (!foldedNoted && progress > 0.985 && phase != Phase.HEAT && phase != Phase.HOT) {
+                foldedNoted = true
+                note("${if (progressIsFolding) "Folded" else "Collapsed"} in ${(eng.time - foldStart).roundToInt()} s")
+            }
+        } else eng.updateCenter()
         // Camera: follow the centre, zoom to fit, turn slowly unless a finger is on it
         for (k in 0..2) view[k] += (eng.center[k] - view[k]) * min(1.0, dt * 3)
         zoom += (fitZoom() - zoom) * min(1.0, dt * 1.2)
         if (downId < 0) yaw += dt * 0.12
         pageYaw += (pageYawTarget - pageYaw) * min(1.0, dt * 4)
         updateSolvent(dt)
+        takeSnapshot()
         hudAcc += dt
         if (hudAcc >= 0.25) {
             hudAcc = 0.0
@@ -290,6 +381,10 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         return (sortable.toLong() shl 32) or id.toLong()
     }
 
+    /**
+     * Drawing runs on the display thread without the lock: everything the physics thread changes (positions,
+     * charges, flashes, events) is read from the snapshot update() takes; the rest only changes on this thread.
+     */
     fun draw(c: Canvas) {
         c.drawRect(0f, 0f, w, h, bg)
         for (k in solX.indices) {
@@ -313,17 +408,21 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
 
         zMin = zmin; zSpan = zspan
         val byChain = colourByChain()
-        if (settings.viewStyle == 0) drawBeads(c, byChain, big) else drawCartoon(c, byChain, ribbons = settings.viewStyle == 1)
+        when (settings.viewStyle) {
+            0 -> drawBeads(c, byChain, big)
+            3 -> { drawBeads(c, byChain, big, overlay = true); drawCartoon(c, byChain, ribbons = true, alpha = 0.88f) }
+            else -> drawCartoon(c, byChain, ribbons = settings.viewStyle == 1)
+        }
 
         // Reaction flashes: proton transfers (small rings) and disulfide chemistry (sulfur bursts)
-        for (f in eng.flashes) {
+        for (f in snapFlashes) {
             val age = eng.time - f.t; val i = f.res
             if (i >= n) continue
             if (f.kind == Flash.SS) {
                 val k = (age / 1.2).toFloat()
                 stroke.color = withAlpha(Col.SULFUR, 0.8f * (1 - k)); stroke.strokeWidth = 2 * density
                 c.drawCircle(px[i], py[i], pr[i] + k * 30 * density, stroke)
-            } else if (age < 0.45 && !big && settings.viewStyle == 0 && pr[i] > 3 * density) {
+            } else if (age < 0.45 && !big && (settings.viewStyle == 0 || settings.viewStyle == 3) && pr[i] > 3 * density) {
                 val k = (age / 0.45).toFloat()
                 stroke.color = withAlpha(if (f.kind == Flash.GAINED) Col.POS else Col.TEXT, 0.5f * (1 - k)); stroke.strokeWidth = 1.2f * density
                 c.drawCircle(px[i], py[i], pr[i] + (2 + k * 10) * density, stroke)
@@ -345,6 +444,26 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         }
 
         if (settings.hud) drawHud(c)
+        if (settings.showProgress) drawProgress(c)
+    }
+
+    /** A small bar at the top: how close to folded (or, without a known structure, to collapsed). */
+    private fun drawProgress(c: Canvas) {
+        val pw = min(dp(220f), w - dp(32f)); val ph = dp(34f)
+        val x0 = (w - pw) / 2; val y0 = topInset + (if (wallpaperMode) dp(28f) else dp(16f))
+        fill.color = Col.PANEL; c.drawRoundRect(x0, y0, x0 + pw, y0 + ph, dp(9f), dp(9f), fill)
+        stroke.color = Col.LINE; stroke.strokeWidth = density; c.drawRoundRect(x0, y0, x0 + pw, y0 + ph, dp(9f), dp(9f), stroke)
+        val pct = (progress * 100).roundToInt()
+        text.textAlign = Paint.Align.LEFT; text.typeface = sans; text.textSize = dp(11f); text.color = Col.HAZE; text.letterSpacing = 0.04f
+        c.drawText(if (progressIsFolding) "Folded" else "Collapsed", x0 + dp(12f), y0 + dp(15f), text)
+        text.letterSpacing = 0f
+        text.textAlign = Paint.Align.RIGHT; text.typeface = mono; text.textSize = dp(12f); text.color = Col.TEXT
+        c.drawText("$pct %", x0 + pw - dp(12f), y0 + dp(15f), text)
+        text.textAlign = Paint.Align.LEFT
+        val bx = x0 + dp(12f); val bw = pw - dp(24f); val by = y0 + dp(23f)
+        fill.color = Col.LINE; c.drawRoundRect(bx, by, bx + bw, by + dp(4f), dp(2f), dp(2f), fill)
+        fill.color = if (pct >= 99) Col.STRAND else mix(Col.HAZE, Col.POLAR, progress.toFloat())
+        if (pct > 0) c.drawRoundRect(bx, by, bx + bw * progress.toFloat(), by + dp(4f), dp(2f), dp(2f), fill)
     }
 
     // Depth cueing: far things fade into the background
@@ -354,8 +473,16 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
     private fun fog(col: Int, zv: Double) = mix(Col.INK, col, 0.35f + 0.65f * near(zv))
 
     // ---------- Style 0: beads on a backbone ----------
-    private fun drawBeads(c: Canvas, byChain: Boolean, big: Boolean) {
+    private fun drawBeads(c: Canvas, byChain: Boolean, big: Boolean, overlay: Boolean = false) {
         val n = eng.n
+        if (overlay) {
+            // Under a cartoon: smaller, see-through beads only, depth-sorted
+            var m = 0
+            for (i in 0 until n) keys[m++] = depthKey(pz[i], i)
+            java.util.Arrays.sort(keys, 0, m)
+            for (k in 0 until m) { val i = (keys[k] and 0xFFFFFFFFL).toInt(); drawResidue(c, i, fog(drawColor(i, byChain), pz[i]), near(pz[i]), big, alpha = 0.55f, scale = 0.8f) }
+            return
+        }
         // Hydrophobic contacts and salt bridges sit underneath everything
         stroke.strokeCap = Paint.Cap.ROUND
         stroke.color = withAlpha(Col.HYDRO, 0.16f); stroke.strokeWidth = max(0.6f * density, (zoom * 0.18).toFloat())
@@ -442,7 +569,7 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
     }
 
     private fun buildSpline(): Int {
-        val n = eng.n; val x = eng.x; val y = eng.y; val z = eng.z; val ch = eng.chainOf
+        val n = eng.n; val x = snapX; val y = snapY; val z = snapZ; val ch = eng.chainOf
         // Per-residue normals, pointing into the local curve; flipped along strands so the sheet doesn't twist
         for (i in 0 until n) {
             val a = if (i > 0 && ch[i - 1] == ch[i]) i - 1 else -1
@@ -503,7 +630,7 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         }
     }
 
-    private fun drawCartoon(c: Canvas, byChain: Boolean, ribbons: Boolean) {
+    private fun drawCartoon(c: Canvas, byChain: Boolean, ribbons: Boolean, alpha: Float = 1f) {
         val n = eng.n
         val m = buildSpline()
         // Depth-sort spline segments (id < m) and disulfides (m…m+63)
@@ -533,7 +660,7 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
             if (hw0 == 0.0 && hw1 == 0.0) {
                 // Loops and the plain trace: a round tube
                 stroke.strokeCap = Paint.Cap.ROUND
-                stroke.color = fog(base, zc)
+                stroke.color = withAlpha(fog(base, zc), alpha)
                 stroke.strokeWidth = (if (ribbons) 0.7f else 0.9f) * (aS + bS) / 2
                 c.drawLine(ax, ay, bx, by, stroke)
                 continue
@@ -544,12 +671,12 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
             projectPoint(spX[k + 1] + spWx[k + 1] * hw1, spY[k + 1] + spWy[k + 1] * hw1, spZ[k + 1] + spWz[k + 1] * hw1); val l1x = tpx; val l1y = tpy
             projectPoint(spX[k + 1] - spWx[k + 1] * hw1, spY[k + 1] - spWy[k + 1] * hw1, spZ[k + 1] - spWz[k + 1] * hw1); val r1x = tpx; val r1y = tpy
             val light = 0.45f + 0.55f * facing(spNx[k], spNy[k], spNz[k])
-            fill.color = mix(Col.INK, fog(base, zc), light)
+            fill.color = withAlpha(mix(Col.INK, fog(base, zc), light), alpha)
             quad.reset(); quad.moveTo(l0x, l0y); quad.lineTo(l1x, l1y); quad.lineTo(r1x, r1y); quad.lineTo(r0x, r0y); quad.close()
             c.drawPath(quad, fill)
             // A fine outline on the edges keeps thin, edge-on ribbons visible
             stroke.strokeCap = Paint.Cap.BUTT; stroke.strokeWidth = 0.7f * density
-            stroke.color = fog(base, zc)
+            stroke.color = withAlpha(fog(base, zc), alpha)
             c.drawLine(l0x, l0y, l1x, l1y, stroke); c.drawLine(r0x, r0y, r1x, r1y, stroke)
         }
         stroke.strokeCap = Paint.Cap.ROUND
@@ -561,16 +688,16 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         }
     }
 
-    private fun drawResidue(c: Canvas, i: Int, col: Int, nearness: Float, big: Boolean) {
-        val r = pr[i]; val x = px[i]; val y = py[i]
-        fill.color = col; c.drawCircle(x, y, r, fill)
+    private fun drawResidue(c: Canvas, i: Int, col: Int, nearness: Float, big: Boolean, alpha: Float = 1f, scale: Float = 1f) {
+        val r = pr[i] * scale; val x = px[i]; val y = py[i]
+        fill.color = withAlpha(col, alpha); c.drawCircle(x, y, r, fill)
         if (!big) {
-            stroke.color = 0x7304060C; stroke.strokeWidth = density; c.drawCircle(x, y, r, stroke)
-            fill.color = withAlpha(0xFFFFFF, 0.1f + 0.2f * nearness); c.drawCircle(x - r * 0.3f, y - r * 0.3f, r * 0.38f, fill)
+            stroke.color = withAlpha(0x04060C, 0.45f * alpha); stroke.strokeWidth = density; c.drawCircle(x, y, r, stroke)
+            fill.color = withAlpha(0xFFFFFF, (0.1f + 0.2f * nearness) * alpha); c.drawCircle(x - r * 0.3f, y - r * 0.3f, r * 0.38f, fill)
         }
-        val q = eng.charge[i]
+        val q = snapQ[i]
         if (abs(q) > 0.5 && r > 5 * density) {
-            stroke.color = 0xBF04060C.toInt(); stroke.strokeWidth = max(1.2f * density, r * 0.18f)
+            stroke.color = withAlpha(0x04060C, 0.75f * alpha); stroke.strokeWidth = max(1.2f * density, r * 0.18f)
             val g = r * 0.42f
             c.drawLine(x - g, y, x + g, y, stroke)
             if (q > 0) c.drawLine(x, y - g, x, y + g, stroke)
@@ -684,7 +811,7 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         // Energy trace with the lowest energy since the last unfold
         drawSpark(c, left, y, inner, dp(40f))
         text.typeface = mono; text.textSize = dp(9f); text.color = Col.HAZE
-        val rate = if (eng.n > 300) " · ${(stepsPerSecond / 1000).let { "%.1f".format(it) }}k steps/s" else ""
+        val rate = if (eng.n > 300 || physicsThread != null) " · ${(stepsPerSecond / 1000).let { "%.1f".format(it) }}k steps/s" else ""
         c.drawText("Energy, last 60 s$rate", left, y + dp(52f), text)
         y += dp(62f)
 
@@ -705,7 +832,7 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
     }
     private fun mergedEvents(): List<Triple<Double, String, Boolean>> {
         val all = ArrayList<Triple<Double, String, Boolean>>()
-        for (e in eng.events) all.add(Triple(e.t, e.text, true))
+        for (e in snapEvents) all.add(Triple(e.t, e.text, true))
         for (nt in notes) all.add(Triple(nt.t, nt.text, false))
         all.sortByDescending { it.first }
         return all.take(3)
@@ -741,7 +868,8 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
     private val ripples = ArrayList<DoubleArray>()
     private val tmp = DoubleArray(3)
 
-    fun onTouch(e: MotionEvent): Boolean {
+    fun onTouch(e: MotionEvent): Boolean = lock.withLock { onTouchLocked(e) }
+    private fun onTouchLocked(e: MotionEvent): Boolean {
         if (!loaded) return false
         when (e.actionMasked) {
             MotionEvent.ACTION_DOWN -> {

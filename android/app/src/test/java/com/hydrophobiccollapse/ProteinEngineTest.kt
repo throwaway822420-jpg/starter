@@ -289,4 +289,5 @@ ATOM 7 CA . PHE A 4 ? 26.772 33.436 9.197 2
         e.measure()
         assertTrue("largest clump ${e.largestComplex} of 6", e.largestComplex >= 4)
     }
+
 }

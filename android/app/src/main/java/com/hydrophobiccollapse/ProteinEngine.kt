@@ -593,39 +593,7 @@ class ProteinEngine {
         }
 
         // Contacts: residue-specific Lennard-Jones (minimum at σ, depth ε). Chains interact exactly as residues within one chain do.
-        val sc = 1 / LJ_CUT.pow(6)
-        val sa = shortPairs.a; val sb = shortPairs.b
-        val nat = shortNat
-        for (p in 0 until shortPairs.size) {
-            val i = sa[p]; val j = sb[p]
-            val dx = x[i] - x[j]; val dy = y[i] - y[j]; val dz = z[i] - z[j]
-            var r2 = dx * dx + dy * dy + dz * dz
-            val s: Double; val ep: Double; val cut2: Double; val attractive: Boolean
-            if (j == i + 3 && chainOf[i] == chainOf[j]) { s = SIG_I3; ep = 0.5; attractive = false; cut2 = s * s }
-            else {
-                s = 0.9 * (rad[i] + rad[j]); attractive = true; cut2 = (LJ_CUT * s) * (LJ_CUT * s)
-                // With a known structure, native pairs hand over to the native term and other contacts weaken
-                val w = if (lam == 0.0) 1.0 else if (nat[p]) 1 - lam
-                        else if (hasNat[i] && hasNat[j] && natGroup[i] == natGroup[j]) 1 - 0.8 * lam else 1.0
-                ep = EPS20[type[i] * 20 + type[j]] * w
-            }
-            if (r2 >= cut2) continue
-            if (r2 < 1) r2 = 1.0
-            val s2 = s * s / r2; val s6 = s2 * s2 * s2
-            var f = 12 * ep * (s6 * s6 - s6) / r2
-            val r = sqrt(r2)
-            if (abs(f * r) > FMAX) f = sign(f) * FMAX / r
-            fx[i] += f * dx; fy[i] += f * dy; fz[i] += f * dz
-            fx[j] -= f * dx; fy[j] -= f * dy; fz[j] -= f * dz
-            if (measure) {
-                if (attractive) {
-                    eContact += ep * (s6 * s6 - 2 * s6) - ep * (sc * sc - 2 * sc)
-                    if (r2 < (1.25 * s) * (1.25 * s)) contacts.add(i, j)
-                } else {
-                    eContact += ep * (s6 * s6 - 2 * s6 + 1)
-                }
-            }
-        }
+        eContact += contactRange(0, shortPairs.size, fx, fy, fz, lam, measure)
 
         // Structure-based contacts: a 12–10 well centred on each pair's distance in the real structure
         if (lam > 0) {
@@ -721,6 +689,46 @@ class ProteinEngine {
             energy = eLocal + eContact + eElec
         }
         return total
+    }
+
+    /** Pair contact forces for shortPairs[p0, p1) into the given arrays; returns the contact energy when measuring. */
+    private fun contactRange(p0: Int, p1: Int, ox: DoubleArray, oy: DoubleArray, oz: DoubleArray, lam: Double, measure: Boolean): Double {
+        val x = x; val y = y; val z = z
+        val sc = 1 / LJ_CUT.pow(6)
+        val sa = shortPairs.a; val sb = shortPairs.b
+        val nat = shortNat
+        var e = 0.0
+        for (p in p0 until p1) {
+            val i = sa[p]; val j = sb[p]
+            val dx = x[i] - x[j]; val dy = y[i] - y[j]; val dz = z[i] - z[j]
+            var r2 = dx * dx + dy * dy + dz * dz
+            val s: Double; val ep: Double; val cut2: Double; val attractive: Boolean
+            if (j == i + 3 && chainOf[i] == chainOf[j]) { s = SIG_I3; ep = 0.5; attractive = false; cut2 = s * s }
+            else {
+                s = 0.9 * (rad[i] + rad[j]); attractive = true; cut2 = (LJ_CUT * s) * (LJ_CUT * s)
+                // With a known structure, native pairs hand over to the native term and other contacts weaken
+                val w = if (lam == 0.0) 1.0 else if (nat[p]) 1 - lam
+                        else if (hasNat[i] && hasNat[j] && natGroup[i] == natGroup[j]) 1 - 0.8 * lam else 1.0
+                ep = EPS20[type[i] * 20 + type[j]] * w
+            }
+            if (r2 >= cut2) continue
+            if (r2 < 1) r2 = 1.0
+            val s2 = s * s / r2; val s6 = s2 * s2 * s2
+            var f = 12 * ep * (s6 * s6 - s6) / r2
+            val r = sqrt(r2)
+            if (abs(f * r) > FMAX) f = sign(f) * FMAX / r
+            ox[i] += f * dx; oy[i] += f * dy; oz[i] += f * dz
+            ox[j] -= f * dx; oy[j] -= f * dy; oz[j] -= f * dz
+            if (measure) {
+                if (attractive) {
+                    e += ep * (s6 * s6 - 2 * s6) - ep * (sc * sc - 2 * sc)
+                    if (r2 < (1.25 * s) * (1.25 * s)) contacts.add(i, j)
+                } else {
+                    e += ep * (s6 * s6 - 2 * s6 + 1)
+                }
+            }
+        }
+        return e
     }
 
     /** For tests: the forces from the last forces() call. */

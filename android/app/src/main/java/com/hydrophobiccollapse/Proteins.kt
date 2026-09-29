@@ -267,7 +267,9 @@ data class Settings(
     val speed: Float = 1f,
     val cycle: Int = 90,
     val hud: Boolean = false,
-    val saver: Boolean = false,
+    /** 0 battery saver, 1 balanced, 2 extreme (fold as fast as possible) */
+    val performance: Int = 1,
+    val showProgress: Boolean = true,
     val randomLength: Int = 120,
     val randomStyle: Int = 0,
     val randomOnWake: Boolean = true,
@@ -276,14 +278,14 @@ data class Settings(
     val crowding: Int = 2,
     /** 0 auto (chains when there are several), 1 chemistry, 2 chain */
     val colorBy: Int = 0,
-    /** 0 beads, 1 cartoon, 2 backbone trace */
+    /** 0 beads, 1 cartoon, 2 backbone trace, 3 beads with the cartoon on top */
     val viewStyle: Int = 0,
 ) {
     fun save(p: SharedPreferences) {
         p.edit()
             .putString("protein", protein).putInt("temp", temp).putFloat("ph", ph).putInt("salt", salt)
             .putFloat("redox", redox).putFloat("speed", speed).putInt("cycle", cycle)
-            .putBoolean("hud", hud).putBoolean("saver", saver)
+            .putBoolean("hud", hud).putInt("performance", performance).putBoolean("showProgress", showProgress)
             .putInt("randomLength", randomLength).putInt("randomStyle", randomStyle).putBoolean("randomOnWake", randomOnWake)
             .putString("customJson", customJson).putFloat("nativeBias", nativeBias).putInt("crowding", crowding)
             .putInt("colorBy", colorBy).putInt("viewStyle", viewStyle)
@@ -308,7 +310,9 @@ data class Settings(
                 speed = p.getFloat("speed", d.speed),
                 cycle = p.getInt("cycle", d.cycle),
                 hud = p.getBoolean("hud", d.hud),
-                saver = p.getBoolean("saver", d.saver),
+                // Older versions had an on/off battery saver
+                performance = p.getInt("performance", if (p.getBoolean("saver", false)) 0 else d.performance),
+                showProgress = p.getBoolean("showProgress", d.showProgress),
                 randomLength = p.getInt("randomLength", d.randomLength),
                 randomStyle = p.getInt("randomStyle", d.randomStyle),
                 randomOnWake = p.getBoolean("randomOnWake", d.randomOnWake),
@@ -326,3 +330,6 @@ data class Settings(
         }
     }
 }
+
+/** Frames per second the display runs at for a performance setting. */
+fun Settings.lowFrameRate() = performance != 1

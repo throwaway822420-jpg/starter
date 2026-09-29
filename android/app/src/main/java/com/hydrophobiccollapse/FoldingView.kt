@@ -17,19 +17,21 @@ class FoldingView(context: Context, attrs: AttributeSet? = null) : View(context,
     fun start() {
         if (running) return
         running = true; lastNs = 0L
+        sim.setActive(true)
         Choreographer.getInstance().postFrameCallback(this)
     }
     fun stop() {
         running = false
+        sim.setActive(false)
         Choreographer.getInstance().removeFrameCallback(this)
     }
 
-    override fun onDetachedFromWindow() { stop(); super.onDetachedFromWindow() }
+    override fun onDetachedFromWindow() { stop(); sim.release(); super.onDetachedFromWindow() }
 
     override fun doFrame(frameTimeNanos: Long) {
         if (!running) return
         Choreographer.getInstance().postFrameCallback(this)
-        if (lastNs != 0L && sim.settings.saver && frameTimeNanos - lastNs < 32_000_000L) return
+        if (lastNs != 0L && sim.settings.lowFrameRate() && frameTimeNanos - lastNs < 32_000_000L) return
         val dt = if (lastNs == 0L) 1.0 / 60 else (frameTimeNanos - lastNs) / 1e9
         lastNs = frameTimeNanos
         sim.update(dt)

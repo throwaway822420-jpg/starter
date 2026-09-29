@@ -105,11 +105,26 @@ The web version (`index.html`) has the original six proteins and doesn't have th
 
 ## On screen
 
+**Folding progress:** a bar at the top shows how close the protein is to folded. It can be switched off in settings.
+- **With a known structure:** it counts native contacts formed and how close the RMSD is to the real structure, both measured from the unfolded start. It shows the lower of the two, so 100% needs 90% of native contacts and under 2 Å RMSD.
+- **Without one:** it's labelled "Collapsed" instead. It measures how far the chain has shrunk toward the typical size of a folded protein that long (radius of gyration ≈ 2.2·N^0.38 Å).
+
+The first time the bar reaches 100%, the event feed logs how long folding took.
+
+**Performance (settings):**
+- **Battery saver:** 30 fps with light computing.
+- **Balanced:** the default.
+- **Extreme:** runs the simulation nonstop on its own thread, drawing at 30 fps from a snapshot so the display never holds it up. The speed slider no longer applies.
+
+At desktop speed, including drawing, Extreme ran villin 41× faster than Balanced and the hemoglobin tetramer 1.7× faster. It only computes while the wallpaper or app is visible, but then uses much more battery.
+
+
 **Views (Android app, in settings under View):**
 - **Style:**
   - **Beads** draws every residue.
   - **Cartoon** draws a smooth spline through the backbone. Helices become twisting ribbons that read as spirals, strands become flat arrows, and loops become thin tubes. Each ribbon is oriented from the local Cα geometry and shaded by which way it faces.
   - **Backbone trace** is just the tube.
+  - **Beads + cartoon** draws the ribbons over smaller, see-through beads.
 - **Colour by:**
   - **Chemistry** uses the colours below.
   - **Chain** colours each chain, beads included, in one of eight bold colours. A single chain gets the rainbow from blue (N-terminus) to red (C-terminus) that structure viewers use.

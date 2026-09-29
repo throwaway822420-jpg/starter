@@ -63,6 +63,51 @@ class RenderSnapshotTest {
     }
 
     @Test
+    fun overlayAndProgressFrames() {
+        frame("overlay-ubiquitin.png", Settings(protein = "ubq", viewStyle = 3), 40)
+        frame("overlay-insulin.png", Settings(protein = "insulin", viewStyle = 3), 40)
+    }
+
+    @Test
+    fun progressReachesFoldedForTrpCage() {
+        val best = (1..3).maxOf {
+            val sim = Simulation(density = 1.5f, wallpaperMode = true)
+            sim.applySettings(Settings(protein = "trpcage"))
+            sim.resize(800, 600)
+            repeat(40 * 30) { sim.update(1.0 / 30) }
+            sim.progress
+        }
+        assertTrue("progress $best", best > 0.8)
+    }
+
+    /** Steps per wall-clock second in Balanced and Extreme, drawing at the rate each mode uses. */
+    @Test
+    fun extremeModeRunsMoreSteps() {
+        for (id in listOf("villin", "hemoglobin")) {
+            val rates = listOf(1, 2).map { perf ->
+                val sim = Simulation(density = 1.5f, wallpaperMode = true)
+                sim.applySettings(Settings(protein = id, performance = perf))
+                sim.resize(800, 600)
+                sim.setActive(true)
+                val frame = if (perf == 2) 33L else 16L
+                val b = Bitmap.createBitmap(800, 600, Bitmap.Config.ARGB_8888); val c = Canvas(b)
+                val t0 = System.nanoTime(); var frames = 0
+                while (System.nanoTime() - t0 < 4_000_000_000L) {
+                    val f0 = System.nanoTime()
+                    sim.update(frame / 1000.0); sim.draw(c); frames++
+                    val left = frame - (System.nanoTime() - f0) / 1_000_000
+                    if (left > 0) Thread.sleep(left)
+                }
+                val r = sim.stepsPerSecond
+                sim.release()
+                r
+            }
+            println("SPEED $id balanced=%.0f extreme=%.0f steps/s (%.1fx)".format(rates[0], rates[1], rates[1] / rates[0]))
+            assertTrue("$id: extreme ${rates[1]} vs balanced ${rates[0]}", rates[1] > rates[0])
+        }
+    }
+
+    @Test
     fun hemoglobinFrame() = frame("hemoglobin.png", Settings(protein = "hemoglobin", hud = true), 20)
 
     @Test

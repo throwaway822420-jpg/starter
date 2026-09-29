@@ -95,6 +95,7 @@ class SettingsActivity : Activity() {
             (toggle.layoutParams as FrameLayout.LayoutParams).setMargins(left + dp(16), top + dp(16), dp(16), dp(16))
             panel.requestLayout(); toggle.requestLayout()
             preview.sim.bottomInset = bottom.toFloat()
+            preview.sim.topInset = top.toFloat() + dp(40)   // below the "Hide controls" button
             insets
         }
         setContentView(root)
@@ -136,7 +137,7 @@ class SettingsActivity : Activity() {
 
         col.addView(section("View"))
         col.addView(label("Style"), margins(top = 6))
-        col.addView(spinner(listOf("Beads: every residue", "Cartoon: helix spirals, strand arrows", "Backbone trace"), s.viewStyle.coerceIn(0, 2)) { idx ->
+        col.addView(spinner(listOf("Beads: every residue", "Cartoon: helix spirals, strand arrows", "Backbone trace", "Beads + cartoon overlay"), s.viewStyle.coerceIn(0, 3)) { idx ->
             if (idx != s.viewStyle) update(s.copy(viewStyle = idx))
         }, margins(top = 4))
         col.addView(label("Colour by"), margins(top = 10))
@@ -152,7 +153,16 @@ class SettingsActivity : Activity() {
             if (cycles[idx].first != s.cycle) update(s.copy(cycle = cycles[idx].first))
         }, margins(top = 4))
         col.addView(switch("Show readout", s.hud) { update(s.copy(hud = it)) }, margins(top = 10))
-        col.addView(switch("Battery saver (30 fps)", s.saver) { update(s.copy(saver = it)) }, margins(top = 2))
+        col.addView(label("Performance"), margins(top = 10))
+        val perfNames = listOf("Battery saver: 30 fps, light computing", "Balanced", "Extreme: fold as fast as possible")
+        val perfNote = body("").apply { textSize = 12f }
+        fun perfText(p: Int) = if (p == 2) "Runs the simulation nonstop on its own thread, and uses several cores for big proteins. The speed slider no longer applies. Uses much more battery, and only while visible." else ""
+        col.addView(spinner(perfNames, s.performance.coerceIn(0, 2)) { idx ->
+            if (idx != s.performance) { update(s.copy(performance = idx)); perfNote.text = perfText(idx); perfNote.visibility = if (idx == 2) View.VISIBLE else View.GONE }
+        }, margins(top = 4))
+        perfNote.text = perfText(s.performance); perfNote.visibility = if (s.performance == 2) View.VISIBLE else View.GONE
+        col.addView(perfNote, margins(top = 4))
+        col.addView(switch("Show folding progress", s.showProgress) { update(s.copy(showProgress = it)) }, margins(top = 6))
 
         val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         row.addView(button("Heat to unfold", primary = false) {
