@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="ink">#0A0F1D</color>
+    <color name="hydro">#F0A44B</color>
+    <style name="AppTheme" parent="android:Theme.Material.NoActionBar">
+        <item name="android:colorPrimary">@color/ink</item>
+        <item name="android:colorPrimaryDark">@color/ink</item>
+        <item name="android:colorAccent">@color/hydro</item>
+        <item name="android:colorControlActivated">@color/hydro</item>
+        <item name="android:windowBackground">@color/ink</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:textColorPrimary">#E4E8F3</item>
+        <item name="android:textColorSecondary">#8A94B0</item>
+    </style>
+</resources>

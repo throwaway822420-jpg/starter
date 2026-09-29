@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Hydrophobic Collapse</string>
+    <string name="wallpaper_description">Real proteins folding in 3D, with pH-driven proton transfers and disulfide chemistry.</string>
+</resources>

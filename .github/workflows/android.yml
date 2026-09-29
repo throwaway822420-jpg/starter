@@ -1,0 +1,57 @@
+name: Android wallpaper
+
+on:
+  push:
+    paths:
+      - "android/**"
+      - ".github/workflows/android.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Unit tests (physics checks and render snapshots)
+        run: ./gradlew --no-daemon testDebugUnitTest
+
+      - name: Build APK
+        run: |
+          ./gradlew --no-daemon assembleDebug
+          cp app/build/outputs/apk/debug/app-debug.apk HydrophobicCollapse.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HydrophobicCollapse-apk
+          path: |
+            android/HydrophobicCollapse.apk
+            android/app/build/snapshots/*.png
+
+      - name: Publish to the wallpaper-latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete wallpaper-latest --cleanup-tag --yes || true
+          gh release create wallpaper-latest HydrophobicCollapse.apk \
+            --target "$GITHUB_SHA" \
+            --prerelease \
+            --title "Hydrophobic Collapse wallpaper (latest build)" \
+            --notes "Download HydrophobicCollapse.apk on your Android device and open it to install. Built from ${GITHUB_SHA::7} on ${GITHUB_REF_NAME}."

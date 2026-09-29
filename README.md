@@ -2,6 +2,32 @@
 
 An interactive live wallpaper that folds real protein sequences in 3D, with real solution chemistry. The whole thing is one file, `index.html`. The original 2D version is kept in `classic.html`.
 
+## Install on your tablet (Android app)
+
+The `android/` folder is a native live-wallpaper app running the same physics and chemistry. GitHub builds it automatically on every push.
+
+1. On the tablet, open this repo's **Releases** page on GitHub and download **HydrophobicCollapse.apk** from the release named "Hydrophobic Collapse wallpaper (latest build)".
+2. Open the downloaded file. Android will ask you to allow installs from your browser (or My Files). Allow it once, then tap **Install**.
+3. Open **Hydrophobic Collapse** from your apps. You get a live preview with all the controls. Tap **Set as wallpaper**, then choose Home screen, Lock screen or both.
+
+To update, download the newest APK and install it over the old one. Your settings carry over.
+
+On the home screen:
+- drag a residue to pull it
+- tap to stir the water
+- double-tap to heat and unfold
+- swipe between pages to turn the molecule
+
+Open the app any time to change the protein or the conditions. The wallpaper updates live.
+
+The app is signed with a fixed debug-style key kept in the repo (`android/app/wallpaper-debug.keystore`), so every build can install over the last one. That's fine for a personal sideloaded app, but don't reuse the key for anything published.
+
+**Building it yourself:** from `android/`, run `./gradlew assembleDebug` (needs JDK 17+ and the Android SDK). `./gradlew testDebugUnitTest` runs the physics checks and renders sample frames to `app/build/snapshots/`.
+
+## Web version
+
+Open `index.html` in any browser to run the same simulation there, with the same controls.
+
 ## What it simulates
 
 Each bead is one amino acid, placed at its Cα atom. The chain moves under Langevin dynamics in implicit water, which means random thermal kicks plus friction. Units are real: Å, kcal/mol and kelvin.
