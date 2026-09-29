@@ -451,4 +451,44 @@ ATOM 7 CA . PHE A 4 ? 26.772 33.436 9.197 2
         assertEquals(Proteins.byId("insulin").chains, chains.map { it.seq })
         assertEquals(rec[0].xyz[3] - rec[0].xyz.filterIndexed { k, _ -> k % 3 == 0 }.average().toFloat(), chains[0].ca[3], 2e-3f)
     }
+
+    @Test
+    fun ribosomeMakesEveryChainAndReleasesIt() {
+        for (id in listOf("ubq", "insulin")) {
+            val e = ProteinEngine(); e.seed(21)
+            e.ribosome = true; e.ribosomeSpeed = 2
+            e.load(Proteins.byId(id)); e.temperature = 300.0
+            assertTrue(e.translating && e.made == 1 && e.released == 0)
+            var steps = 0; var lastMade = e.made
+            while (e.translating && steps < 200_000) {
+                e.step(50); steps += 50
+                assertTrue("$id: residues are only ever added", e.made >= lastMade); lastMade = e.made
+                // Bonds of the made chain never tear, in the tunnel or out of it
+                for (i in 0 until e.made - 1) if (e.sameChain(i, i + 1)) {
+                    val d = Math.sqrt((e.x[i + 1] - e.x[i]).let { it * it } + (e.y[i + 1] - e.y[i]).let { it * it } + (e.z[i + 1] - e.z[i]).let { it * it })
+                    assertTrue("$id: bond $i stretched to $d Å at step $steps (made ${e.made}, released ${e.released})", d < 5.0)
+                }
+            }
+            assertTrue("$id: translation finished", !e.translating)
+            assertEquals(e.n, e.made); assertEquals(e.n, e.released)
+            e.measure()
+            assertTrue(e.total.isFinite() && e.rg > 0)
+        }
+    }
+
+    @Test
+    fun ribosomeForcesAndListsAreConsistentMidway() {
+        val e = ProteinEngine(); e.seed(22)
+        e.ribosome = true; e.ribosomeSpeed = 2
+        e.load(Proteins.byId("bpti")); e.temperature = 300.0
+        e.step(3000)
+        assertTrue(e.translating && e.released in 2 until e.n)
+        val err = gradientError(e)
+        assertTrue("analytic forces off by $err", err < 1e-5)
+        e.useNeighbourLists = true
+        val fast = e.forces(true)
+        e.useNeighbourLists = false
+        val slow = e.forces(true)
+        assertEquals("neighbour lists changed the energy", slow, fast, 1e-6 * max(1.0, abs(slow)))
+    }
 }

@@ -20,6 +20,8 @@ class Recording(val n: Int) {
         val temperature: Float,
         val cagePhase: Int,
         val cageProgress: Float,
+        val made: Int,                // residues made by the ribosome so far (n when it's done)
+        val released: Int,            // residues out of the ribosome's tunnel
     )
 
     /** Frames kept: two minutes, fewer for very big proteins so memory stays under about 24 MB. */
@@ -42,7 +44,7 @@ class Recording(val n: Int) {
         for (k in ds.indices) { pairs[3 * k] = ds[k][0]; pairs[3 * k + 1] = ds[k][1]; pairs[3 * k + 2] = ds[k][2] }
         if (frames.size >= capacity) frames.removeFirst()
         frames.addLast(Frame(xyz, q, ss, pairs, eng.time, progress.toFloat(), eng.energy.toFloat(), temperature.toFloat(),
-            eng.cagePhase, eng.cageProgress.toFloat()))
+            eng.cagePhase, eng.cageProgress.toFloat(), eng.made, eng.released))
     }
 
     companion object { const val INTERVAL = 0.25 }

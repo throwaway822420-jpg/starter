@@ -31,7 +31,7 @@ class RenderSnapshotTest {
     @Test
     fun wallpaperFrame() {
         val sim = Simulation(density = 1.5f, wallpaperMode = true)
-        sim.applySettings(Settings(protein = "bpti", hud = true))
+        sim.applySettings(Settings(protein = "bpti", hud = true, ribosome = false))
         sim.resize(1600, 1000)
         repeat(900) { sim.update(1.0 / 30) } // 30 s of simulated wall time
         val b = Bitmap.createBitmap(1600, 1000, Bitmap.Config.ARGB_8888)
@@ -40,18 +40,20 @@ class RenderSnapshotTest {
         assertTrue(sim.eng.rg < 20)
     }
 
-    private fun frame(name: String, s: Settings, seconds: Int) {
+    /** Frames start from a full unfolded chain unless [ribosome] is set. */
+    private fun frame(name: String, s: Settings, seconds: Int, ribosome: Boolean = false): Simulation {
         val sim = Simulation(density = 1.5f, wallpaperMode = true)
-        sim.applySettings(s)
+        sim.applySettings(s.copy(ribosome = ribosome))
         sim.resize(1600, 1000)
         repeat(seconds * 30) { sim.update(1.0 / 30) }
         val b = Bitmap.createBitmap(1600, 1000, Bitmap.Config.ARGB_8888)
         sim.draw(AndroidCanvas(Canvas(b)))
         save(b, name)
+        return sim
     }
 
     @Test
-    fun ubiquitinGuidedFrame() = frame("ubiquitin-guided.png", Settings(protein = "ubq", hud = true), 40)
+    fun ubiquitinGuidedFrame() { frame("ubiquitin-guided.png", Settings(protein = "ubq", hud = true), 40) }
 
     @Test
     fun cartoonFrames() {
@@ -69,7 +71,7 @@ class RenderSnapshotTest {
         frame("effects-beads-bpti.png", Settings(protein = "bpti", effects = true), 20)
         // A replay: the recording plays back while the engine waits
         val sim = Simulation(density = 1.5f, wallpaperMode = true)
-        sim.applySettings(Settings(protein = "ubq", viewStyle = 3))
+        sim.applySettings(Settings(protein = "ubq", viewStyle = 3, ribosome = false))
         sim.resize(1600, 1000)
         repeat(30 * 30) { sim.update(1.0 / 30) }
         val t = sim.eng.time
@@ -95,7 +97,7 @@ class RenderSnapshotTest {
     fun progressReachesFoldedForTrpCage() {
         val best = (1..3).maxOf {
             val sim = Simulation(density = 1.5f, wallpaperMode = true)
-            sim.applySettings(Settings(protein = "trpcage"))
+            sim.applySettings(Settings(protein = "trpcage", ribosome = false))
             sim.resize(800, 600)
             repeat(40 * 30) { sim.update(1.0 / 30) }
             sim.progress
@@ -109,7 +111,7 @@ class RenderSnapshotTest {
         for (id in listOf("villin", "hemoglobin")) {
             val rates = listOf(1, 2).map { perf ->
                 val sim = Simulation(density = 1.5f, wallpaperMode = true)
-                sim.applySettings(Settings(protein = id, performance = perf))
+                sim.applySettings(Settings(protein = id, performance = perf, ribosome = false))
                 sim.resize(800, 600)
                 sim.setActive(true)
                 val frame = if (perf == 2) 33L else 16L
@@ -134,7 +136,7 @@ class RenderSnapshotTest {
     fun experimentFrames() {
         // Readout with the folding funnel, and the inspector on a residue
         val sim = Simulation(density = 1.5f, wallpaperMode = true)
-        sim.applySettings(Settings(protein = "ubq", hud = true))
+        sim.applySettings(Settings(protein = "ubq", hud = true, ribosome = false))
         sim.resize(1600, 1000)
         repeat(40 * 30) { sim.update(1.0 / 30) }
         sim.selectResidue(42)
@@ -146,13 +148,22 @@ class RenderSnapshotTest {
     }
 
     @Test
-    fun hemoglobinFrame() = frame("hemoglobin.png", Settings(protein = "hemoglobin", hud = true), 20)
+    fun hemoglobinFrame() { frame("hemoglobin.png", Settings(protein = "hemoglobin", hud = true), 20) }
 
     @Test
-    fun insulinFrame() = frame("insulin.png", Settings(protein = "insulin", hud = true, redox = 0.8f), 30)
+    fun insulinFrame() { frame("insulin.png", Settings(protein = "insulin", hud = true, redox = 0.8f), 30) }
 
     @Test
-    fun randomLargeFrame() = frame("random-1500.png", Settings(protein = Proteins.RANDOM_ID, randomLength = 1500, randomStyle = 1, hud = true), 20)
+    fun randomLargeFrame() { frame("random-1500.png", Settings(protein = Proteins.RANDOM_ID, randomLength = 1500, randomStyle = 1, hud = true), 20) }
+
+    /** Proteins made on the ribosome: part-way through, a multi-chain protein, and one that has finished. */
+    @Test
+    fun ribosomeFrames() {
+        frame("ribosome-myoglobin.png", Settings(protein = "myoglobin", viewStyle = 1, hud = true), 6, ribosome = true)
+        frame("ribosome-hemoglobin.png", Settings(protein = "hemoglobin", viewStyle = 3), 12, ribosome = true)
+        val sim = frame("ribosome-ubiquitin-done.png", Settings(protein = "ubq", viewStyle = 1), 40, ribosome = true)
+        assertTrue("translation finishes", !sim.eng.translating && sim.eng.released == sim.eng.n)
+    }
 
     @Test
     fun settingsScreen() {

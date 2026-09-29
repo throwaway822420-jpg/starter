@@ -430,6 +430,11 @@ class MainWindow(startAsWallpaper: Boolean) : JFrame("Hydrophobic Collapse") {
             add(full(combo(listOf("Dilute: protein fills 3% of the space", "Crowded: 12%", "Cell-like: 25%, as in cytoplasm"), s.crowding) { update(s.copy(crowding = it)) }))
 
             section("Experiments")
+            add(check("Grow on a ribosome", s.ribosome) { update(s.copy(ribosome = it)) })
+            add(note("Each new protein is made one residue at a time, front end first, as in a real cell, pausing between domains. The first parts fold before the rest exists. Fun to watch, and it helps all-helix proteins like myoglobin, but most proteins fold a little faster without it."))
+            add(label("Ribosome speed"))
+            add(full(combo(listOf("Slow: more time to fold on the way", "Normal", "Fast"), s.ribosomeSpeed) { update(s.copy(ribosomeSpeed = it)) }))
+            add(gap(6))
             add(check("Chaperone cage (GroEL)", s.chaperone) { update(s.copy(chaperone = it)) })
             add(note("A barrel-shaped helper protein from real cells. Its sticky lining grabs the chain and pulls tangles apart, then a lid closes so it can fold alone inside, then it's released. The cycle repeats."))
             add(slider("Pull the ends apart (optical tweezers)", 0.0, 300.0, 10.0, s.pullPN.toDouble(), { if (it == 0.0) "off" else "${it.roundToInt()} pN" }) { update(s.copy(pullPN = it.toFloat())) })

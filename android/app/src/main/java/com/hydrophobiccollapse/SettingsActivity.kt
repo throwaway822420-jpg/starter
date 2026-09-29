@@ -149,7 +149,13 @@ class SettingsActivity : Activity() {
         col.addView(switch("Depth of field and contact sparks", s.effects) { update(s.copy(effects = it)) }, margins(top = 10))
 
         col.addView(section("Experiments"))
-        col.addView(switch("Chaperone cage (GroEL)", s.chaperone) { update(s.copy(chaperone = it)) }, margins(top = 6))
+        col.addView(switch("Grow on a ribosome", s.ribosome) { update(s.copy(ribosome = it)) }, margins(top = 6))
+        col.addView(body("Each new protein is made one residue at a time, front end first, as in a real cell, pausing between domains. The first parts fold before the rest exists. Fun to watch, and it helps all-helix proteins like myoglobin, but most proteins fold a little faster without it.").apply { textSize = 12f }, margins(top = 2))
+        col.addView(label("Ribosome speed"), margins(top = 6))
+        col.addView(spinner(listOf("Slow: more time to fold on the way", "Normal", "Fast"), s.ribosomeSpeed) { idx ->
+            if (idx != s.ribosomeSpeed) update(s.copy(ribosomeSpeed = idx))
+        }, margins(top = 4))
+        col.addView(switch("Chaperone cage (GroEL)", s.chaperone) { update(s.copy(chaperone = it)) }, margins(top = 10))
         col.addView(body("A barrel-shaped helper protein from real cells. Its sticky lining grabs the chain and pulls tangles apart, then a lid closes so it can fold alone inside, then it's released. The cycle repeats.").apply { textSize = 12f }, margins(top = 2))
         col.addView(slider("Pull the ends apart (optical tweezers)", 0f, 300f, 10f, s.pullPN, { if (it == 0f) "off" else "${it.roundToInt()} pN" }) { update(s.copy(pullPN = it)) })
         col.addView(body("Real proteins unfold under roughly 100–300 pN in single-molecule experiments.").apply { textSize = 12f }, margins(top = 2))

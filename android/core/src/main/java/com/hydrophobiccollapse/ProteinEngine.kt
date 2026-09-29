@@ -91,6 +91,21 @@ private const val K_CAGE_WALL = 5.0        // cage wall stiffness, kcal/(mol·Å
 private const val K_CAGE_BIND = 0.02       // pull of the whole chain into the open cage while capturing
 private const val CAGE_EJECT = 0.15        // upward push per residue as the lid comes off, kcal/(mol·Å)
 private val CAGE_SECONDS = doubleArrayOf(0.0, 3.0, 8.0, 2.5)   // off, capture, enclosed, release
+// Ribosome. The exit tunnel runs along −y (up on screen) from its mouth; the nascent chain inside it zigzags
+// (bond angle about 127°) so the residue that has just come out meets a physically sensible angle.
+private const val TUNNEL_LEN = 30          // residues inside the exit tunnel, as in real ribosomes (~100 Å)
+private const val TUNNEL_RISE = 3.4        // Å per residue along the tunnel
+private const val TUNNEL_ZIG = 0.85        // sideways offset of alternate residues, Å (with the rise, bonds stay 3.8 Å)
+private const val K_RIBO_WALL = 5.0        // the ribosome's surface, kcal/(mol·Å²)
+// Residues this close to the tunnel mouth already take up room (and can touch the free chain), so nothing is
+// sitting where they come out
+private const val MOUTH_SLOTS = 3
+// Pauses at domain boundaries: domains are at least this long, the ribosome waits this many residues' time, and a
+// cut counts as a boundary when the contacts across it are below this share of what a cut through a domain has
+private const val MIN_DOMAIN = 40
+private const val PAUSE_FACTOR = 60
+private const val DOMAIN_SCORE = 0.12
+private val RIBO_STEPS = intArrayOf(400, 150, 50)   // simulation steps per residue added: slow, normal, fast
 
 const val AMINO_ACIDS = "ARNDCQEGHILKMFPSTWYV"
 private const val MAX_SIG = 0.9 * 2 * 3.5
@@ -257,7 +272,7 @@ class ProteinEngine {
     /** How far through the current phase, 0…1. */
     val cageProgress get() = if (cagePhase == CAGE_OFF) 0.0 else (cageT / CAGE_SECONDS[cagePhase]).coerceIn(0.0, 1.0)
     private fun updateCage(dt: Double) {
-        if (cagePhase == CAGE_OFF) return
+        if (cagePhase == CAGE_OFF || translating) return
         cageT += dt
         if (cageT < CAGE_SECONDS[cagePhase]) return
         cageT = 0.0
@@ -267,6 +282,33 @@ class ProteinEngine {
             else -> { cageCycles++; log("GroEL captures the chain again (cycle ${cageCycles + 1})"); CAGE_CAPTURE }
         }
     }
+
+    /**
+     * Ribosome mode (read by load()): the protein is made N-terminus first, one residue at a time, and leaves
+     * through the ribosome's exit tunnel, so early parts can fold before later parts exist. Chains are made one
+     * after another. Residues [0, released) are free; [released, made) are held in the tunnel; the rest don't
+     * exist yet (they wait, parked and ignored, at the tunnel's inner end).
+     */
+    var ribosome = false
+    /** How fast residues are added: 0 slow, 1 normal, 2 fast. */
+    var ribosomeSpeed = 1
+        set(v) { field = v.coerceIn(0, 2) }
+    /** True until the last chain has fully left the tunnel. */
+    var translating = false; private set
+    /** Residues made so far. */
+    var made = 0; private set
+    /** Residues out of the tunnel, free to move and interact. */
+    var released = 0; private set
+    /** Residues that interact with others: the free ones, plus the few about to leave the tunnel. */
+    private val interacting get() = min(made, released + MOUTH_SLOTS)
+    /** Progress toward the next residue, 0…1: the chain in the tunnel slides out smoothly by this fraction. */
+    var elongation = 0.0; private set
+    /** y of the tunnel mouth, where the ribosome's surface is. */
+    val exitY get() = -0.5 * rBox
+    private val tunnelEndY get() = exitY - TUNNEL_LEN * TUNNEL_RISE
+    private var riboChain = 0                  // the chain being made
+    private var riboHead = 0                   // index one past the newest residue; runs past the chain's end while it is pushed out
+    private var riboDwell = 1                  // steps the current residue takes
 
     // Known structure (PDB or AlphaFold) and how strongly to steer toward it, 0…1
     var nativeBias = 1.0
@@ -364,8 +406,125 @@ class ProteinEngine {
         events.clear(); flashes.clear(); time = 0.0; stepCount = 0
         grab = -1
         unfoldCoords()
+        if (ribosome && n > 0) startTranslation() else { translating = false; made = n; released = n; elongation = 0.0 }
         updateCharges()
         measure()
+    }
+
+    // ---------- Ribosome: making the chain ----------
+    private fun startTranslation() {
+        translating = true; riboChain = 0; made = 0; released = 0; elongation = 0.0
+        planPauses()
+        for (i in 0 until n) { x[i] = 0.0; y[i] = tunnelEndY - 2; z[i] = 0.0 }
+        startChain()
+        log("Ribosome: making chain ${chainLetter(0)}")
+    }
+    private fun startChain() {
+        riboHead = chainStart[riboChain] + 1
+        made = riboHead
+        riboDwell = dwellSteps(riboHead)
+        listsValid = false
+        placeTunnel()
+    }
+    /** Held residues sit in their tunnel slots, shifted outward by the elongation progress. */
+    private fun placeTunnel() {
+        for (i in released until made) {
+            val k = riboHead - 1 - i
+            x[i] = if (i % 2 == 0) TUNNEL_ZIG else -TUNNEL_ZIG
+            y[i] = tunnelEndY + (k + elongation) * TUNNEL_RISE; z[i] = 0.0
+            vx[i] = 0.0; vy[i] = 0.0; vz[i] = 0.0
+        }
+    }
+    /** One step of translation: slide the tunnel's chain out, and add a residue each time it moves a whole slot. */
+    private fun translate() {
+        elongation += 1.0 / riboDwell
+        if (elongation >= 1) {
+            elongation = 0.0
+            riboHead++
+            val end = chainStart[riboChain + 1]
+            made = min(riboHead, end)
+            listsValid = false
+            // The residue that reaches the mouth leaves the tunnel
+            val out = riboHead - 1 - TUNNEL_LEN
+            if (out >= chainStart[riboChain]) released = out + 1
+            if (released >= end) {
+                log("Ribosome: chain ${chainLetter(riboChain)} released")
+                riboChain++
+                if (riboChain == nChains) {
+                    translating = false; made = n; released = n
+                    if (nChains > 1) log("Translation complete")
+                    if (cagePhase != CAGE_OFF) cageT = 0.0
+                    return
+                }
+                startChain()
+                log("Ribosome: making chain ${chainLetter(riboChain)}")
+                return
+            }
+            // Once the chain is complete, the rest slides out at the base pace (faster rams the free chain into itself)
+            riboDwell = if (riboHead < end) dwellSteps(riboHead) else RIBO_STEPS[ribosomeSpeed]
+        }
+        placeTunnel()
+    }
+
+    /**
+     * Simulation steps the ribosome takes to add residue i (2000 steps are one second at 1× speed). Real
+     * ribosomes don't run at a steady pace: they slow down at rare codons, and those pauses often sit between
+     * domains, giving the finished part time to fold before the next part comes out.
+     */
+    private fun dwellSteps(i: Int): Int {
+        val base = RIBO_STEPS[ribosomeSpeed]
+        if (i < pauseBefore.size && pauseBefore[i]) {
+            log("Ribosome pauses: a domain has left the tunnel")
+            return base * PAUSE_FACTOR
+        }
+        return base
+    }
+
+    /** Where the ribosome pauses: residues it waits before adding, each just after a domain clears the tunnel. */
+    private var pauseBefore = BooleanArray(0)
+    /** Domain boundaries found in the known structure, as residue indices (the first residue after each cut). */
+    var domainCuts: List<Int> = emptyList(); private set
+    /**
+     * Finds domain boundaries from the known structure: places where few native contacts cross from the part
+     * already made to the part still to come, compared with how many contacts the smaller side has on its own.
+     */
+    private fun planPauses() {
+        pauseBefore = BooleanArray(n)
+        val cuts = ArrayList<Int>()
+        if (nNat > 0) for (c in 0 until nChains) {
+            val s0 = chainStart[c]; val len = chainStart[c + 1] - s0
+            if (len < 2 * MIN_DOMAIN) continue
+            // cross[p]: native contacts from residues before the cut at p to residues at or after it
+            val diff = IntArray(len + 2)
+            val per = IntArray(len)
+            for (k in 0 until nNat) {
+                val a = ncI[k]; val b = ncJ[k]
+                if (chainOf[a] != c || chainOf[b] != c) continue
+                diff[a - s0 + 1]++; diff[b - s0 + 1]--
+                per[a - s0]++; per[b - s0]++
+            }
+            val cross = IntArray(len + 1)
+            var run = 0
+            for (p in 1 until len) { run += diff[p]; cross[p] = run }
+            // Contacts per residue, for scale: a cut inside a domain crosses several per residue of the smaller side
+            val meanPer = per.average().coerceAtLeast(1.0)
+            val score = DoubleArray(len + 1) { Double.MAX_VALUE }
+            for (p in MIN_DOMAIN..len - MIN_DOMAIN) score[p] = cross[p] / (min(p, len - p) * meanPer)
+            val order = (MIN_DOMAIN..len - MIN_DOMAIN).sortedBy { score[it] }
+            val chosen = ArrayList<Int>()
+            for (p in order) {
+                if (score[p] > DOMAIN_SCORE) break
+                if (chosen.any { abs(it - p) < MIN_DOMAIN }) continue
+                chosen.add(p)
+            }
+            for (p in chosen) {
+                cuts.add(s0 + p)
+                // Pause once the residue before the cut has come out of the tunnel
+                val at = s0 + p + TUNNEL_LEN
+                if (at < chainStart[c + 1]) pauseBefore[at] = true
+            }
+        }
+        domainCuts = cuts.sorted()
     }
 
     private fun loadStructure(protein: Protein) {
@@ -528,16 +687,21 @@ class ProteinEngine {
     private val allIdx get() = IntArray(n) { it }
     private fun rebuildLists() {
         shortPairs.clear(); elecPairs.clear()
+        // Only free residues and those at the tunnel mouth interact (the tunnel shields the rest); titratable
+        // is sorted, so they come first
+        val rel = interacting
+        var nTit = 0
+        while (nTit < titratable.size && titratable[nTit] < rel) nTit++
         if (!useNeighbourLists) {
-            for (i in 0 until n) for (j in i + 1 until n) if (!excludedShort(i, j)) shortPairs.add(i, j)
-            for (a in titratable.indices) for (b in a + 1 until titratable.size) {
+            for (i in 0 until rel) for (j in i + 1 until rel) if (!excludedShort(i, j)) shortPairs.add(i, j)
+            for (a in 0 until nTit) for (b in a + 1 until nTit) {
                 val i = titratable[a]; val j = titratable[b]
                 if (!excludedElec(i, j)) elecPairs.add(i, j)
             }
         } else {
             val all = allIdx
-            gridPairs(all, n, LJ_CUT * MAX_SIG + SKIN) { i, j, _ -> if (!excludedShort(i, j)) shortPairs.add(i, j) }
-            gridPairs(titratable, titratable.size, ECUT_MAX + SKIN) { i, j, _ -> if (!excludedElec(i, j)) elecPairs.add(i, j) }
+            gridPairs(all, rel, LJ_CUT * MAX_SIG + SKIN) { i, j, _ -> if (!excludedShort(i, j)) shortPairs.add(i, j) }
+            gridPairs(titratable, nTit, ECUT_MAX + SKIN) { i, j, _ -> if (!excludedElec(i, j)) elecPairs.add(i, j) }
         }
         // Mark which short-range pairs are native contacts; their generic attraction fades as guidance rises
         if (shortNat.size < shortPairs.size) shortNat = BooleanArray(shortPairs.a.size)
@@ -549,7 +713,7 @@ class ProteinEngine {
     private fun checkLists() {
         if (!listsValid || !useNeighbourLists) { rebuildLists(); return }
         val lim = (SKIN / 2) * (SKIN / 2)
-        for (i in 0 until n) {
+        for (i in 0 until interacting) {
             val dx = x[i] - x0[i]; val dy = y[i] - y0[i]; val dz = z[i] - z0[i]
             if (dx * dx + dy * dy + dz * dz > lim) { rebuildLists(); return }
         }
@@ -559,6 +723,8 @@ class ProteinEngine {
     fun forces(measure: Boolean): Double {
         checkLists()
         val n = n; val x = x; val y = y; val z = z
+        val mk = made; val rel = released        // residues that exist, and those free of the ribosome
+        val act = interacting
         fx.fill(0.0); fy.fill(0.0); fz.fill(0.0)
         var eBond = 0.0; var eLocal = 0.0; var eContact = 0.0; var eElec = 0.0
         val lam = if (nNat > 0) nativeBias.coerceIn(0.0, 1.0) else 0.0
@@ -568,7 +734,8 @@ class ProteinEngine {
         if (measure) contacts.clear()
 
         // Bonds (within a chain)
-        for (i in 0 until n - 1) {
+        // Bonded terms need all their residues made and one of them free (the chain held in the tunnel isn't folding)
+        for (i in 0 until min(mk - 1, rel)) {
             if (chainOf[i] != chainOf[i + 1]) continue
             val dx = x[i + 1] - x[i]; val dy = y[i + 1] - y[i]; val dz = z[i + 1] - z[i]
             val r = sqrt(dx * dx + dy * dy + dz * dz).coerceAtLeast(1e-6)
@@ -580,7 +747,7 @@ class ProteinEngine {
         }
 
         // Virtual bond angles: walls plus helix (91°) and strand (120°) wells
-        for (i in 0 until n - 2) {
+        for (i in 0 until min(mk - 2, rel)) {
             if (chainOf[i] != chainOf[i + 2]) continue
             val j = i + 1; val k = i + 2
             val ax = x[i] - x[j]; val ay = y[i] - y[j]; val az = z[i] - z[j]
@@ -610,7 +777,7 @@ class ProteinEngine {
         }
 
         // Virtual dihedrals: right-handed helix (+50°) and extended strand (−170°) wells
-        for (i in 0 until n - 3) {
+        for (i in 0 until min(mk - 3, rel)) {
             if (chainOf[i] != chainOf[i + 3]) continue
             val i1 = i + 1; val i2 = i + 2; val i3 = i + 3
             val b1x = x[i1] - x[i]; val b1y = y[i1] - y[i]; val b1z = z[i1] - z[i]
@@ -650,7 +817,7 @@ class ProteinEngine {
         }
 
         // Helical i→i+4 hydrogen bond
-        for (i in 0 until n - 4) {
+        for (i in 0 until min(mk - 4, rel)) {
             if (wHB[i] == 0.0) continue
             val j = i + 4
             val dx = x[i] - x[j]; val dy = y[i] - y[j]; val dz = z[i] - z[j]
@@ -674,6 +841,7 @@ class ProteinEngine {
             val shift = 5 * c12 - 6 * c10
             for (k in 0 until nNat) {
                 val i = ncI[k]; val j = ncJ[k]; val r0 = ncR[k]
+                if (j >= act) continue
                 val dx = x[i] - x[j]; val dy = y[i] - y[j]; val dz = z[i] - z[j]
                 var r2 = dx * dx + dy * dy + dz * dz
                 if (chainOf[i] != chainOf[j]) {
@@ -733,13 +901,15 @@ class ProteinEngine {
 
         // Confinement sphere and a gentle pull back to the origin
         var cx = 0.0; var cy = 0.0; var cz = 0.0
-        for (i in 0 until n) { cx += x[i]; cy += y[i]; cz += z[i] }
-        cx /= n; cy /= n; cz /= n
+        for (i in 0 until rel) { cx += x[i]; cy += y[i]; cz += z[i] }
+        if (rel > 0) { cx /= rel; cy /= rel; cz /= rel }
         var eBox = 0.0
         // While the ends are pulled, give the chain room to stretch to its full length
         val rb = if (pullPN > 0) max(rBox, 0.5 * R_BOND * n + 10) else rBox
-        for (i in 0 until n) {
-            fx[i] -= 0.01 * cx; fy[i] -= 0.01 * cy; fz[i] -= 0.01 * cz
+        // No pull to the centre while the chain hangs from the ribosome: it would stretch it like tweezers
+        val pull = if (translating) 0.0 else 0.01
+        for (i in 0 until rel) {
+            fx[i] -= pull * cx; fy[i] -= pull * cy; fz[i] -= pull * cz
             val r = sqrt(x[i] * x[i] + y[i] * y[i] + z[i] * z[i])
             if (r > rb) {
                 val f = -min(5 * (r - rb), FMAX) / r
@@ -747,22 +917,34 @@ class ProteinEngine {
                 if (measure) { val d = r - rb; val dc = FMAX / 5; eBox += if (d < dc) 2.5 * d * d else 2.5 * dc * dc + FMAX * (d - dc) }
             }
         }
-        if (measure) eBox += 0.005 * n * (cx * cx + cy * cy + cz * cz)
+        if (measure) eBox += 0.5 * pull * rel * (cx * cx + cy * cy + cz * cz)
+        // The ribosome's surface: free residues stay below it (a little way into the tunnel mouth is allowed)
+        if (translating) {
+            val ey = exitY
+            for (i in 0 until rel) {
+                val lim = if (x[i] * x[i] + z[i] * z[i] < 25.0) ey - 2 else ey
+                if (y[i] < lim) {
+                    val d = lim - y[i]
+                    fy[i] += min(K_RIBO_WALL * d, FMAX)
+                    if (measure) eBox += 0.5 * K_RIBO_WALL * d * d
+                }
+            }
+        }
 
         // Folding assist: pull toward the superposed real structure, or squeeze toward the centre without one
         if (assist > 0) {
             if (nNat > 0) {
                 if (!targetsValid) updateTargets()
                 val k = ASSIST_TARGET_K[assist]
-                for (i in 0 until n) if (hasNat[i]) { fx[i] += k * (tgX[i] - x[i]); fy[i] += k * (tgY[i] - y[i]); fz[i] += k * (tgZ[i] - z[i]) }
+                for (i in 0 until rel) if (hasNat[i]) { fx[i] += k * (tgX[i] - x[i]); fy[i] += k * (tgY[i] - y[i]); fz[i] += k * (tgZ[i] - z[i]) }
             } else {
                 val k = ASSIST_SQUEEZE_K[assist]
-                for (i in 0 until n) { fx[i] -= k * (x[i] - cx); fy[i] -= k * (y[i] - cy); fz[i] -= k * (z[i] - cz) }
+                for (i in 0 until rel) { fx[i] -= k * (x[i] - cx); fy[i] -= k * (y[i] - cy); fz[i] -= k * (z[i] - cz) }
             }
         }
 
         // Optical tweezers: a constant force pulling the first and last residues apart
-        if (pullPN > 0 && n >= 2) {
+        if (pullPN > 0 && n >= 2 && !translating) {
             val a = 0; val b = n - 1
             val dx = x[b] - x[a]; val dy = y[b] - y[a]; val dz = z[b] - z[a]
             val d = sqrt(dx * dx + dy * dy + dz * dz).coerceAtLeast(1e-6)
@@ -771,11 +953,11 @@ class ProteinEngine {
             fx[a] -= f * dx; fy[a] -= f * dy; fz[a] -= f * dz
         }
 
-        if (cagePhase != CAGE_OFF) eBox += cageForces(cx, cy, cz, measure)
+        if (cagePhase != CAGE_OFF && !translating) eBox += cageForces(cx, cy, cz, measure)
 
         // A finger pulling one residue
         val g = grab
-        if (g in 0 until n) {
+        if (g in 0 until rel) {
             var px = 4 * (target[0] - x[g]); var py = 4 * (target[1] - y[g]); var pz = 4 * (target[2] - z[g])
             val m = sqrt(px * px + py * py + pz * pz)
             if (m > FMAX) { px *= FMAX / m; py *= FMAX / m; pz *= FMAX / m }
@@ -887,7 +1069,7 @@ class ProteinEngine {
         var s = 0.0
         for (a in 0 until nCharged) {
             val j = charged[a]
-            if (j == i || (chainOf[i] == chainOf[j] && abs(j - i) < 2)) continue
+            if (j == i || j >= released || (chainOf[i] == chainOf[j] && abs(j - i) < 2)) continue
             val dx = x[i] - x[j]; val dy = y[i] - y[j]; val dz = z[i] - z[j]
             val r2 = dx * dx + dy * dy + dz * dz
             if (r2 > ecut * ecut) continue
@@ -922,7 +1104,7 @@ class ProteinEngine {
         val kT = KB * temperature; val ln10 = ln(10.0)
         // Titration: Metropolis on ΔG = ±kT·ln10·(pKa − pH) + ΔE_elec
         for (s in sites) {
-            if (!s.active) continue
+            if (!s.active || s.res >= released) continue
             val toDeprot = s.prot
             val dq = if (toDeprot) -1.0 else 1.0
             val intrinsic = kT * ln10 * (s.pKa - pH)
@@ -937,6 +1119,7 @@ class ProteinEngine {
         val ox = (1 + redox) / 2; val red = (1 - redox) / 2
         for (a in cys.indices) {
             val i = cys[a]
+            if (i >= released) break
             if (partner[i] >= 0) {
                 val j = partner[i]
                 if (j > i && rand() < 0.0015 * red) {
@@ -948,6 +1131,7 @@ class ProteinEngine {
             }
             for (b in a + 1 until cys.size) {
                 val j = cys[b]
+                if (j >= released) break
                 if (partner[j] >= 0 || !loopOk(i, j)) continue
                 if (!(thiolate(i) || thiolate(j))) continue
                 if (dist(i, j) < SS_REACT && rand() < 0.05 * ox) {
@@ -960,6 +1144,7 @@ class ProteinEngine {
         }
         // Shuffling: free thiolate k attacks disulfide i–j, forming k–i and releasing j as a thiolate
         for (k in cys) {
+            if (k >= released) break
             if (partner[k] >= 0 || !thiolate(k)) continue
             for (i in cys) {
                 val j = partner[i]
@@ -986,13 +1171,14 @@ class ProteinEngine {
         val u = c2 * sqrt(12.0)
         repeat(count) {
             forces(false)
-            for (i in 0 until n) {
+            for (i in 0 until released) {
                 vx[i] = (vx[i] + fx[i] * DT) * c1 + u * (rand() - 0.5)
                 vy[i] = (vy[i] + fy[i] * DT) * c1 + u * (rand() - 0.5)
                 vz[i] = (vz[i] + fz[i] * DT) * c1 + u * (rand() - 0.5)
                 x[i] += vx[i] * DT; y[i] += vy[i] * DT; z[i] += vz[i] * DT
             }
             stepCount++
+            if (translating) translate()
             if (stepCount % MC_EVERY == 0L) chemistry()
             if (assist > 0 && stepCount % ASSIST_EVERY == 0L) targetsValid = false
         }
@@ -1001,9 +1187,11 @@ class ProteinEngine {
 
     /** Cheap per-frame update of the centre of mass (measure() does this too). */
     fun updateCenter() {
+        val m = released
+        if (m == 0) { center[0] = 0.0; center[1] = exitY; center[2] = 0.0; return }
         var cx = 0.0; var cy = 0.0; var cz = 0.0
-        for (i in 0 until n) { cx += x[i]; cy += y[i]; cz += z[i] }
-        center[0] = cx / n; center[1] = cy / n; center[2] = cz / n
+        for (i in 0 until m) { cx += x[i]; cy += y[i]; cz += z[i] }
+        center[0] = cx / m; center[1] = cy / m; center[2] = cz / m
     }
 
     // ---------- Observables ----------
@@ -1011,9 +1199,10 @@ class ProteinEngine {
         forces(true)
         updateCenter()
         val cx = center[0]; val cy = center[1]; val cz = center[2]
+        val rel = released
         var s2 = 0.0
-        for (i in 0 until n) { val dx = x[i] - cx; val dy = y[i] - cy; val dz = z[i] - cz; s2 += dx * dx + dy * dy + dz * dz }
-        rg = sqrt(s2 / n)
+        for (i in 0 until rel) { val dx = x[i] - cx; val dy = y[i] - cy; val dz = z[i] - cz; s2 += dx * dx + dy * dy + dz * dz }
+        rg = if (rel > 0) sqrt(s2 / rel) else 0.0
         // Secondary structure from Cα geometry: two consecutive helical (or extended) dihedrals, within one chain
         ss.fill(0)
         val angs = DoubleArray(n) { Double.NaN }; val dihs = DoubleArray(n) { Double.NaN }
@@ -1021,11 +1210,11 @@ class ProteinEngine {
         for (i in 0 until n - 3) if (chainOf[i] == chainOf[i + 3]) dihs[i] = dihedral(i)
         fun helical(i: Int) = abs(wrap(dihs[i] - PHI_HELIX)) < 35 * DEG && angs[i] < 105 * DEG && angs[i + 1] < 105 * DEG
         fun extended(i: Int) = abs(wrap(dihs[i] - PHI_STRAND)) < 45 * DEG && angs[i] > 105 * DEG && angs[i + 1] > 105 * DEG
-        for (i in 0 until n - 4) {
+        for (i in 0 until rel - 4) {
             if (chainOf[i] != chainOf[i + 4]) continue
             if (helical(i) && helical(i + 1)) for (k in i..i + 4) ss[k] = 1
         }
-        for (i in 0 until n - 4) {
+        for (i in 0 until rel - 4) {
             if (chainOf[i] != chainOf[i + 4]) continue
             if (extended(i) && extended(i + 1)) for (k in i..i + 4) if (ss[k] == 0) ss[k] = 2
         }
@@ -1058,17 +1247,18 @@ class ProteinEngine {
             for (c in 0 until nChains) size[find(c)]++
             largestComplex = size.max()
         } else largestComplex = 1
-        endToEnd = if (n >= 2) dist(0, n - 1) else 0.0
+        endToEnd = if (n >= 2 && !translating) dist(0, n - 1) else 0.0
         // How close to the known structure
         if (nNat > 0) {
             var formed = 0
             for (k in 0 until nNat) {
+                if (ncJ[k] >= rel) continue          // not made yet, or still in the tunnel
                 val r0 = ncR[k] * 1.2
                 val dx = x[ncI[k]] - x[ncJ[k]]; val dy = y[ncI[k]] - y[ncJ[k]]; val dz = z[ncI[k]] - z[ncJ[k]]
                 if (dx * dx + dy * dy + dz * dz < r0 * r0) formed++
             }
             q = formed.toDouble() / nNat
-            rmsd = if (rmsdMeaningful) rmsdToNative() else Double.NaN
+            rmsd = if (rmsdMeaningful && !translating) rmsdToNative() else Double.NaN   // meaningless until it's all made
         }
     }
     private fun angleOf(ax: DoubleArray, ay: DoubleArray, az: DoubleArray, i: Int): Double {
@@ -1092,16 +1282,16 @@ class ProteinEngine {
      * Best superposition (Horn's quaternion method) of the known structure onto the current coordinates, over
      * residues with known positions. Returns [rmsd, r00…r22, native centre xyz, current centre xyz], or null.
      */
-    private fun superpose(): DoubleArray? {
+    private fun superpose(limit: Int = n): DoubleArray? {
         var m = 0
         var ax = 0.0; var ay = 0.0; var az = 0.0; var bx = 0.0; var by = 0.0; var bz = 0.0
-        for (i in 0 until n) if (hasNat[i]) { m++; ax += natX[i]; ay += natY[i]; az += natZ[i]; bx += x[i]; by += y[i]; bz += z[i] }
+        for (i in 0 until limit) if (hasNat[i]) { m++; ax += natX[i]; ay += natY[i]; az += natZ[i]; bx += x[i]; by += y[i]; bz += z[i] }
         if (m < 3) return null
         ax /= m; ay /= m; az /= m; bx /= m; by /= m; bz /= m
         // S[a][b] = Σ native_a · current_b (centred); g = Σ |native|² + |current|²
         var sxx = 0.0; var sxy = 0.0; var sxz = 0.0; var syx = 0.0; var syy = 0.0; var syz = 0.0; var szx = 0.0; var szy = 0.0; var szz = 0.0
         var g = 0.0
-        for (i in 0 until n) if (hasNat[i]) {
+        for (i in 0 until limit) if (hasNat[i]) {
             val px = natX[i] - ax; val py = natY[i] - ay; val pz = natZ[i] - az
             val qx = x[i] - bx; val qy = y[i] - by; val qz = z[i] - bz
             sxx += px * qx; sxy += px * qy; sxz += px * qz
@@ -1134,8 +1324,8 @@ class ProteinEngine {
     /** Where each residue would sit if the real structure were laid over the chain as it is now. */
     private fun updateTargets() {
         targetsValid = true
-        val t = superpose() ?: return
-        for (i in 0 until n) if (hasNat[i]) {
+        val t = superpose(released) ?: return
+        for (i in 0 until released) if (hasNat[i]) {
             val px = natX[i] - t[10]; val py = natY[i] - t[11]; val pz = natZ[i] - t[12]
             tgX[i] = t[1] * px + t[2] * py + t[3] * pz + t[13]
             tgY[i] = t[4] * px + t[5] * py + t[6] * pz + t[14]
@@ -1173,6 +1363,7 @@ class ProteinEngine {
         for (k in 0 until nNat) if (ncI[k] == i || ncJ[k] == i) {
             total++
             val a = ncI[k]; val b = ncJ[k]
+            if (b >= released) continue
             val dx = x[a] - x[b]; val dy = y[a] - y[b]; val dz = z[a] - z[b]
             if (dx * dx + dy * dy + dz * dz < (1.2 * ncR[k]) * (1.2 * ncR[k])) formed++
         }
@@ -1198,7 +1389,7 @@ class ProteinEngine {
 
     // ---------- Interaction helpers ----------
     fun kick(px: Double, py: Double, pz: Double, radius: Double, strength: Double) {
-        for (i in 0 until n) {
+        for (i in 0 until released) {
             val dx = x[i] - px; val dy = y[i] - py; val dz = z[i] - pz
             val d = sqrt(dx * dx + dy * dy + dz * dz)
             if (d < radius && d > 0.1) {

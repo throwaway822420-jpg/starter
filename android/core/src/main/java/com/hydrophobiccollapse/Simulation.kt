@@ -134,8 +134,10 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         eng.crowding = s.crowding
         eng.assist = s.assist; eng.urea = s.urea.toDouble(); eng.pullPN = s.pullPN.toDouble()
         eng.chaperone = s.chaperone
+        eng.ribosome = s.ribosome; eng.ribosomeSpeed = s.ribosomeSpeed
         val reload = when {
             !loaded -> true
+            old.ribosome != s.ribosome -> true
             s.protein == Proteins.RANDOM_ID -> old.protein != s.protein || old.randomLength != s.randomLength || old.randomStyle != s.randomStyle
             else -> Proteins.byId(s.protein, s.customJson).signature != protein.signature || old.protein != s.protein
         }
@@ -160,9 +162,13 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         histLen = 0; bestE = 0.0; notes.clear(); measureAcc = 0.0
         for (k in 0..2) view[k] = eng.center[k]
         zoom = fitZoom()
-        setPhase(Phase.HOT); phaseT = 3.0
-        // Progress is measured from this unfolded start
-        q0 = if (eng.q.isNaN()) 0.0 else min(eng.q, 0.6); r0 = if (eng.rmsd.isNaN()) 20.0 else max(eng.rmsd, 6.0); rg0 = eng.rg
+        // A chain made on the ribosome folds at the set temperature as it grows; otherwise start hot and unfolded
+        if (eng.translating) { setPhase(Phase.FOLD); note("Ribosome: translation started") } else { setPhase(Phase.HOT); phaseT = 3.0 }
+        // Progress is measured from this unfolded start (for a growing chain, a random coil of the full length)
+        rg0 = if (eng.translating) 1.93 * Math.pow(eng.n.toDouble(), 0.6) else eng.rg
+        q0 = if (eng.q.isNaN()) 0.0 else min(eng.q, 0.6)
+        r0 = if (eng.rmsd.isNaN()) max(20.0, 0.5 * rg0) else max(eng.rmsd, 6.0)
+        riboAlpha = if (eng.translating) 1.0 else 0.0
         progress = 0.0; foldedNoted = false; foldStart = eng.time
         funLen = 0; funHead = 0; selected = -1; selectedInfo = null
         recording = Recording(n); replaying = false; recordAcc = 0.0
@@ -183,6 +189,10 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
     private var snapCageProgress = 0.0
     private var snapCageR = 0.0
     private var snapCageH = 0.0
+    private var snapMade = 0                  // residues made so far; the rest are drawn nowhere
+    private var snapReleased = 0              // residues out of the ribosome tunnel
+    private val snapTranslating get() = snapReleased < eng.n
+    private var snapElongation = 0.0
     private fun ensureSnapArrays(n: Int) {
         if (snapX.size != n) { snapX = DoubleArray(n); snapY = DoubleArray(n); snapZ = DoubleArray(n); snapQ = DoubleArray(n); snapSS = IntArray(n) }
     }
@@ -196,6 +206,7 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         snapFlashes = ArrayList(eng.flashes); snapEvents = ArrayList(eng.events)
         snapCagePhase = eng.cagePhase; snapCageProgress = eng.cageProgress
         snapCageR = eng.cageRadius; snapCageH = eng.cageHalfHeight
+        snapMade = eng.made; snapReleased = eng.released; snapElongation = eng.elongation
         shownProgress = progress
     }
 
@@ -266,7 +277,9 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
             return min(pq, pr)
         }
         val target = 2.2 * Math.pow(eng.n.toDouble(), 0.38)
-        return if (rg0 <= target) 1.0 else ((rg0 - eng.rg) / (rg0 - target)).coerceIn(0.0, 1.0)
+        val collapse = if (rg0 <= target) 1.0 else ((rg0 - eng.rg) / (rg0 - target)).coerceIn(0.0, 1.0)
+        // A part-made chain is compact because it is short: count only the share that exists
+        return if (eng.translating) collapse * eng.released / eng.n else collapse
     }
 
     // ---------- Camera ----------
@@ -281,6 +294,7 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
     private fun fitZoom(): Double {
         var extent = max(2.2 * eng.rg, 16.0)
         if (eng.cagePhase != CAGE_OFF) extent = max(extent, 1.25 * eng.cageHalfHeight)
+        if (riboAlpha > 0.5) extent = max(extent, abs(view[1] - eng.exitY) + 18)
         return min(w, h) * 0.42 / extent * userZoom
     }
     /** Turn the molecule (drag, arrow keys). */
@@ -433,6 +447,8 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         }
         for (k in 0..2) view[k] += (target[k] - view[k]) * min(1.0, dt * 3)
         zoom += (fitZoom() - zoom) * min(1.0, dt * 1.2)
+        // The ribosome fades out once the last chain has left it
+        riboAlpha += ((if (snapTranslating) 1.0 else 0.0) - riboAlpha) * min(1.0, dt * 0.8)
         if (downId < 0 && !(replaying && replayPaused)) yaw += dt * 0.12
         pageYaw += (pageYawTarget - pageYaw) * min(1.0, dt * 4)
     }
@@ -470,8 +486,15 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         replayPos = (replayPos + seconds / Recording.INTERVAL).coerceIn(0.0, recording.size - 1.0)
         showReplayFrame()
     }
-    /** The chosen speed, slowed for short recordings so a replay always lasts at least four seconds. */
-    private fun replaySpeed() = min(settings.replaySpeed.toDouble(), max(1.0, recording.seconds / 4))
+    /**
+     * How many times faster than real time the replay plays right now: the chosen speed (slowed for short
+     * recordings so a replay lasts at least four seconds), easing to a tenth of that for a slow-motion finish.
+     */
+    private fun replaySpeed(): Double {
+        val base = min(settings.replaySpeed.toDouble(), max(1.0, recording.seconds / 4))
+        val howFar = (replayPos / max(recording.size - 1.0, 1.0)).coerceIn(0.0, 1.0)
+        return base * (1.0 - 0.9 * howFar)
+    }
     private fun updateReplay(dt: Double) {
         if (!replayPaused && !scrubbing) {
             replayPos += dt * replaySpeed() / Recording.INTERVAL
@@ -492,24 +515,26 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         val n = eng.n
         ensureSnapArrays(n)
         var cx = 0.0; var cy = 0.0; var cz = 0.0
+        val near = if (t < 0.5f) a else b
+        val counted = max(1, min(a.released, b.released))
         for (i in 0 until n) {
             val x = a.xyz[3 * i] + (b.xyz[3 * i] - a.xyz[3 * i]) * t
             val y = a.xyz[3 * i + 1] + (b.xyz[3 * i + 1] - a.xyz[3 * i + 1]) * t
             val z = a.xyz[3 * i + 2] + (b.xyz[3 * i + 2] - a.xyz[3 * i + 2]) * t
             snapX[i] = x.toDouble(); snapY[i] = y.toDouble(); snapZ[i] = z.toDouble()
-            cx += x; cy += y; cz += z
+            if (i < counted) { cx += x; cy += y; cz += z }
         }
-        val near = if (t < 0.5f) a else b
         for (i in 0 until n) { snapQ[i] = near.charge[i].toDouble(); snapSS[i] = near.ss[i].toInt() }
         snapDisulfides = List(near.disulfides.size / 3) { k -> intArrayOf(near.disulfides[3 * k], near.disulfides[3 * k + 1], near.disulfides[3 * k + 2]) }
         snapFlashes = ArrayList(); snapEvents = ArrayList()
         snapCagePhase = near.cagePhase
         snapCageProgress = (if (a.cagePhase == b.cagePhase) a.cageProgress + (b.cageProgress - a.cageProgress) * t else near.cageProgress).toDouble()
         snapCageR = eng.cageRadiusFor(snapCagePhase); snapCageH = 1.15 * snapCageR
+        snapMade = near.made; snapReleased = near.released; snapElongation = 0.0
         temperature = (a.temperature + (b.temperature - a.temperature) * t).toDouble()
         shownProgress = (a.progress + (b.progress - a.progress) * t).toDouble()
         if (snapCagePhase != CAGE_OFF) replayCenter.fill(0.0)
-        else { replayCenter[0] = cx / n; replayCenter[1] = cy / n; replayCenter[2] = cz / n }
+        else { replayCenter[0] = cx / counted; replayCenter[1] = cy / counted; replayCenter[2] = cz / counted }
     }
     /** Seconds before the end of the recording that the replay is showing. */
     private fun replayAgo(): Double {
@@ -602,7 +627,7 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         val big = n > 600
         project()
         var zmin = Double.MAX_VALUE; var zmax = -Double.MAX_VALUE
-        for (i in 0 until n) { zmin = min(zmin, pz[i]); zmax = max(zmax, pz[i]) }
+        for (i in 0 until snapMade) { zmin = min(zmin, pz[i]); zmax = max(zmax, pz[i]) }
         val zspan = max(1.0, zmax - zmin)
 
         zMin = zmin; zSpan = zspan
@@ -610,6 +635,7 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         val byChain = colourByChain()
         val cageOn = snapCagePhase != CAGE_OFF
         if (cageOn) drawCage(c, front = false)
+        if (riboAlpha > 0.01) drawRibosome(c)
         when (settings.viewStyle) {
             0 -> drawBeads(c, byChain, big)
             3 -> { drawBeads(c, byChain, big, overlay = true); drawCartoon(c, byChain, ribbons = true, alpha = 0.88f) }
@@ -641,10 +667,10 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
             val off = pr[i] + 12 * density
             c.drawText(t, px[i] + dx / len * off, py[i] + dy / len * off + text.textSize * 0.35f, text)
         }
-        if (eng.nChains == 1 && n > 1) { label(0, 1, "N"); label(n - 1, n - 2, "C") }
+        if (eng.nChains == 1 && snapMade > 1) { label(0, 1, "N"); if (snapMade == n) label(n - 1, n - 2, "C") }
         else if (eng.nChains in 2..8) for (ch in 0 until eng.nChains) {
             val s0 = eng.chainStart[ch]
-            if (eng.chainStart[ch + 1] - s0 > 1) label(s0, s0 + 1, eng.chainLetter(ch).toString())
+            if (eng.chainStart[ch + 1] - s0 > 1 && s0 + 1 < snapMade) label(s0, s0 + 1, eng.chainLetter(ch).toString())
         }
 
         if (!replaying) drawPull(c)
@@ -749,7 +775,9 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         val progress = shownProgress
         val pct = (progress * 100).roundToInt()
         text.textAlign = Paint.Align.LEFT; text.typeface = sans; text.textSize = dp(11f); text.color = Col.HAZE; text.letterSpacing = 0.04f
-        c.drawText((if (progressIsFolding) "Folded" else "Collapsed") + (if (settings.assist > 0) " · assisted" else ""), x0 + dp(12f), y0 + dp(15f), text)
+        val label = if (snapTranslating) "Ribosome · ${snapMade} of ${eng.n} made"
+                    else (if (progressIsFolding) "Folded" else "Collapsed") + (if (settings.assist > 0) " · assisted" else "")
+        c.drawText(ellipsize(label, pw - dp(70f)), x0 + dp(12f), y0 + dp(15f), text)
         text.letterSpacing = 0f
         text.textAlign = Paint.Align.RIGHT; text.typeface = mono; text.textSize = dp(12f); text.color = Col.TEXT
         c.drawText("$pct %", x0 + pw - dp(12f), y0 + dp(15f), text)
@@ -775,7 +803,7 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         if (overlay) {
             // Under a cartoon: smaller, see-through beads only, depth-sorted
             var m = 0
-            for (i in 0 until n) keys[m++] = depthKey(pz[i], i)
+            for (i in 0 until snapMade) keys[m++] = depthKey(pz[i], i)
             java.util.Arrays.sort(keys, 0, m)
             for (k in 0 until m) { val i = (keys[k] and 0xFFFFFFFFL).toInt(); drawResidue(c, i, fog(drawColor(i, byChain), pz[i]), near(pz[i]), big, alpha = 0.55f, scale = 0.8f) }
             return
@@ -785,10 +813,10 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
 
         // Depth-sorted backbone segments (id < n), disulfides (n..n+63) and residues (n+64…)
         var m = 0
-        for (i in 0 until n - 1) if (eng.chainOf[i] == eng.chainOf[i + 1]) keys[m++] = depthKey((pz[i] + pz[i + 1]) / 2 - 0.01, i)
+        for (i in 0 until snapMade - 1) if (eng.chainOf[i] == eng.chainOf[i + 1]) keys[m++] = depthKey((pz[i] + pz[i + 1]) / 2 - 0.01, i)
         val ssList = snapDisulfides
         for (k in 0 until min(ssList.size, 64)) { val d = ssList[k]; keys[m++] = depthKey((pz[d[0]] + pz[d[1]]) / 2 - 0.02, n + k) }
-        for (i in 0 until n) keys[m++] = depthKey(pz[i], n + 64 + i)
+        for (i in 0 until snapMade) keys[m++] = depthKey(pz[i], n + 64 + i)
         java.util.Arrays.sort(keys, 0, m)
         for (k in 0 until m) {
             val id = (keys[k] and 0xFFFFFFFFL).toInt()
@@ -897,7 +925,7 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         val sub = CARTOON_SUB
         var m = 0
         for (c0 in 0 until eng.nChains) {
-            val s0 = eng.chainStart[c0]; val s1 = eng.chainStart[c0 + 1] - 1
+            val s0 = eng.chainStart[c0]; val s1 = min(eng.chainStart[c0 + 1], snapMade) - 1
             if (s1 <= s0) continue
             for (i in s0 until s1) {
                 val i0 = max(s0, i - 1); val i2 = i + 1; val i3 = min(s1, i + 2)
@@ -1060,6 +1088,57 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
             }
             fill.color = withAlpha(0xFFFFFF, life); c.drawCircle(x, y, dp(0.6f) + dp(1.8f) * life, fill)
         }
+    }
+
+    // ---------- Ribosome ----------
+    private var riboAlpha = 0.0
+    private val riboPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+    /**
+     * The ribosome the chain is coming out of, above the tunnel mouth (the top of the screen): the large subunit
+     * with the exit tunnel through it, the small subunit on top with the mRNA threading through. Drawn behind the
+     * protein, so the chain inside the tunnel shows through it like a cutaway.
+     */
+    private fun drawRibosome(c: Canvas) {
+        val a = riboAlpha.toFloat()
+        val ey = eng.exitY
+        val big = 62.0
+        fun blob(cy: Double, r: Double, col: Int) {
+            projectPoint(0.0, cy, 0.0)
+            val rad = (r * tps).toFloat()
+            riboPaint.shader = RadialGradient(tpx - rad * 0.3f, tpy + rad * 0.3f, rad * 1.35f,
+                intArrayOf(withAlpha(mix(col, Col.TEXT, 0.35f), 0.9f * a), withAlpha(col, 0.85f * a), withAlpha(mix(col, Col.INK, 0.6f), 0.8f * a)),
+                floatArrayOf(0f, 0.5f, 1f), Shader.TileMode.CLAMP)
+            c.drawCircle(tpx, tpy, rad, riboPaint)
+        }
+        // Small subunit first (it sits beyond the large one), with the mRNA running through it
+        val smallY = ey - 2 * big - 14
+        blob(smallY, 0.62 * big, 0xFF6A5A8C.toInt())
+        stroke.strokeCap = Paint.Cap.ROUND
+        stroke.color = withAlpha(Col.SULFUR, 0.7f * a); stroke.strokeWidth = dp(1.6f)
+        projectPoint(-120.0, smallY + 8, 0.0); val m0x = tpx; val m0y = tpy
+        projectPoint(120.0, smallY + 8, 0.0)
+        c.drawLine(m0x, m0y, tpx, tpy, stroke)
+        // Codon ticks that slide along as residues are added (one codon, three bases, per residue)
+        val shift = ((snapMade + snapElongation) * 9.0) % 18.0
+        stroke.strokeWidth = dp(1f)
+        var tx = -117.0 + 18.0 - shift
+        while (tx < 118) {
+            projectPoint(tx, smallY + 8, 0.0); val ax = tpx; val ay = tpy
+            projectPoint(tx, smallY + 12, 0.0)
+            c.drawLine(ax, ay, tpx, tpy, stroke)
+            tx += 18.0
+        }
+        blob(ey - big + 4, big, 0xFF4E5A8E.toInt())
+        // The tunnel: a faint groove up through the large subunit, and a rim at its mouth
+        projectPoint(0.0, ey, 0.0); val mx = tpx; val my = tpy; val mouth = (4.5 * tps).toFloat()
+        projectPoint(0.0, ey - 2 * big + 20, 0.0)
+        stroke.color = withAlpha(Col.INK, 0.35f * a); stroke.strokeWidth = 1.6f * mouth
+        c.drawLine(mx, my, tpx, tpy, stroke)
+        stroke.color = withAlpha(Col.HAZE, 0.6f * a); stroke.strokeWidth = dp(1.4f); c.drawCircle(mx, my, mouth, stroke)
+        projectPoint(0.0, ey - 2 * big + 8, 0.0)
+        text.typeface = sans; text.textSize = dp(11f); text.textAlign = Paint.Align.CENTER; text.color = withAlpha(Col.HAZE, 0.9f * a)
+        c.drawText(if (snapTranslating) "Ribosome · residue ${snapMade} of ${eng.n}" else "Ribosome", tpx, tpy, text)
+        text.textAlign = Paint.Align.LEFT
     }
 
     // ---------- Chaperone cage ----------
@@ -1225,7 +1304,7 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
                 if (cell >= cells) break
             }
             val lx = left + (cell % perLine) * charW; val ly = y + (cell / perLine) * dp(15f) + dp(11f)
-            text.color = residueColor(i)
+            text.color = if (i < snapMade) residueColor(i) else withAlpha(Col.HAZE, 0.3f)
             c.drawText(eng.seq[i].toString(), lx, ly, text)
             val s = snapSS[i]
             if (s != 0) { fill.color = if (s == 1) Col.HELIX else Col.STRAND; c.drawRect(lx, ly + dp(2f), lx + charW, ly + dp(4f), fill) }
@@ -1374,7 +1453,7 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
                 downId = e.getPointerId(0)
                 downX = e.x; downY = e.y; lastX = e.x; lastY = e.y; downTime = e.eventTime; moved = false
                 var best = -1; var bz = -Double.MAX_VALUE
-                for (i in 0 until eng.n) {
+                for (i in 0 until snapMade) {
                     val d = hypot(px[i] - e.x, py[i] - e.y)
                     if (d < pr[i] + 14 * density && pz[i] > bz) { bz = pz[i]; best = i }
                 }
