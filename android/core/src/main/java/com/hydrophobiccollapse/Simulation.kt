@@ -1,13 +1,14 @@
 package com.hydrophobiccollapse
 
-import android.graphics.Canvas
-import android.graphics.DashPathEffect
-import android.graphics.Paint
-import android.graphics.Path
-import android.graphics.RadialGradient
-import android.graphics.Shader
-import android.graphics.Typeface
-import android.view.MotionEvent
+import com.hydrophobiccollapse.gfx.Canvas
+import com.hydrophobiccollapse.gfx.Color
+import com.hydrophobiccollapse.gfx.DashPathEffect
+import com.hydrophobiccollapse.gfx.Paint
+import com.hydrophobiccollapse.gfx.Path
+import com.hydrophobiccollapse.gfx.PointerEvent
+import com.hydrophobiccollapse.gfx.RadialGradient
+import com.hydrophobiccollapse.gfx.Shader
+import com.hydrophobiccollapse.gfx.Typeface
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 import kotlin.math.PI
@@ -25,7 +26,7 @@ import kotlin.math.sqrt
 
 /**
  * The folding simulation plus everything around it: the heat cycle, the camera, drawing and touch.
- * Used by both the live wallpaper and the preview in the settings screen.
+ * Shared by the Android wallpaper, its settings preview, and the Windows app.
  */
 class Simulation(private val density: Float, private val wallpaperMode: Boolean) {
     val eng = ProteinEngine()
@@ -67,7 +68,7 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         val n = eng.n
         chainCol = IntArray(n) { i ->
             if (eng.nChains > 1) chainPalette[eng.chainOf[i] % chainPalette.size]
-            else android.graphics.Color.HSVToColor(floatArrayOf(240f * (1 - i / max(1f, n - 1f)), 0.62f, 1f))
+            else Color.hsvToColor(240f * (1 - i / max(1f, n - 1f)), 0.62f, 1f)
         }
     }
     private fun colourByChain() = when (settings.colorBy) { 1 -> false; 2 -> true; else -> eng.nChains > 1 }
@@ -989,11 +990,11 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
     private val ripples = ArrayList<DoubleArray>()
     private val tmp = DoubleArray(3)
 
-    fun onTouch(e: MotionEvent): Boolean = lock.withLock { onTouchLocked(e) }
-    private fun onTouchLocked(e: MotionEvent): Boolean {
+    fun onPointer(e: PointerEvent): Boolean = lock.withLock { onTouchLocked(e) }
+    private fun onTouchLocked(e: PointerEvent): Boolean {
         if (!loaded) return false
         when (e.actionMasked) {
-            MotionEvent.ACTION_DOWN -> {
+            PointerEvent.ACTION_DOWN -> {
                 downId = e.getPointerId(0)
                 downX = e.x; downY = e.y; lastX = e.x; lastY = e.y; downTime = e.eventTime; moved = false
                 var best = -1; var bz = -Double.MAX_VALUE
@@ -1004,7 +1005,7 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
                 eng.grab = best
                 if (best >= 0) { unproject(e.x, e.y, pz[best], tmp); System.arraycopy(tmp, 0, eng.target, 0, 3) }
             }
-            MotionEvent.ACTION_MOVE -> {
+            PointerEvent.ACTION_MOVE -> {
                 if (downId < 0) return false
                 if (!moved && hypot(e.x - downX, e.y - downY) > 8 * density) moved = true
                 if (eng.grab >= 0) { unproject(e.x, e.y, pz[eng.grab], tmp); System.arraycopy(tmp, 0, eng.target, 0, 3) }
@@ -1014,12 +1015,12 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
                 }
                 lastX = e.x; lastY = e.y
             }
-            MotionEvent.ACTION_UP -> {
+            PointerEvent.ACTION_UP -> {
                 if (downId >= 0 && !moved && e.eventTime - downTime < 350) tap(e.x, e.y, e.eventTime)
                 eng.grab = -1; downId = -1
             }
-            MotionEvent.ACTION_CANCEL -> { eng.grab = -1; downId = -1 }
-            MotionEvent.ACTION_POINTER_DOWN -> { eng.grab = -1; moved = true }
+            PointerEvent.ACTION_CANCEL -> { eng.grab = -1; downId = -1 }
+            PointerEvent.ACTION_POINTER_DOWN -> { eng.grab = -1; moved = true }
         }
         return true
     }

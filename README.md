@@ -24,6 +24,27 @@ The app is signed with a fixed debug-style key kept in the repo (`android/app/wa
 
 **Building it yourself:** from `android/`, run `./gradlew assembleDebug` (needs JDK 17+ and the Android SDK). `./gradlew testDebugUnitTest` runs the physics checks and renders sample frames to `app/build/snapshots/`.
 
+## Windows app
+
+`android/desktop/` is a standalone Windows app. It shares the physics, chemistry and renderer with the Android app (the `android/core/` module) and has the same controls in a side panel.
+
+1. From the same release, download **HydrophobicCollapse-Windows.zip**.
+2. Unzip it anywhere and run **HydrophobicCollapse.exe**. It bundles its own Java runtime, so nothing else needs installing. Windows SmartScreen may warn about an unsigned app: click **More info → Run anyway**.
+
+Keyboard shortcuts:
+
+| Key | Action |
+|---|---|
+| F11 | Full screen |
+| Esc | Leave full screen |
+| Tab | Hide or show the panel |
+| Space | Heat to unfold |
+| R | Start over |
+
+The mouse works like touch: drag a residue to pull it, click to stir, double-click to heat. Settings are saved in `%APPDATA%\HydrophobicCollapse`.
+
+**Building it yourself:** from `android/`, run `./gradlew :desktop:run` (needs only JDK 17+).
+
 ## Web version
 
 Open `index.html` in any browser to run the same simulation there, with the same controls.

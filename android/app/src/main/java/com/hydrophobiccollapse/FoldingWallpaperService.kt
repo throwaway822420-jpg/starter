@@ -18,7 +18,7 @@ class FoldingWallpaperService : WallpaperService() {
 
     inner class FoldEngine : Engine(), Choreographer.FrameCallback, SharedPreferences.OnSharedPreferenceChangeListener {
         private val prefs = Settings.prefs(this@FoldingWallpaperService)
-        private val sim = Simulation(resources.displayMetrics.density, wallpaperMode = true)
+        private val sim = Simulation(resources.displayMetrics.density, wallpaperMode = true).also { AndroidCanvas.install() }
         private var visible = false
         private var hasSurface = false
         private var lastNs = 0L
@@ -96,7 +96,7 @@ class FoldingWallpaperService : WallpaperService() {
             var c: Canvas? = null
             try {
                 c = try { holder.lockHardwareCanvas() } catch (e: Exception) { holder.lockCanvas() }
-                if (c != null) sim.draw(c)
+                if (c != null) sim.draw(AndroidCanvas(c))
             } catch (e: Exception) {
                 // Surface went away mid-frame; the next visible frame will redraw.
             } finally {
@@ -104,7 +104,7 @@ class FoldingWallpaperService : WallpaperService() {
             }
         }
 
-        override fun onTouchEvent(event: MotionEvent) { sim.onTouch(event) }
+        override fun onTouchEvent(event: MotionEvent) { sim.onPointer(event.toPointer()) }
 
         override fun onApplyWindowInsets(insets: android.view.WindowInsets) {
             super.onApplyWindowInsets(insets)

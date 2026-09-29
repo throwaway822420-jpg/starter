@@ -13,4 +13,4 @@ dependencyResolutionManagement {
     }
 }
 rootProject.name = "HydrophobicCollapse"
-include(":app")
+include(":core", ":app", ":desktop")

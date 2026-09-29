@@ -23,6 +23,7 @@ import java.io.File
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 @Config(sdk = [35], qualifiers = "w1280dp-h800dp-land-mdpi")
 class RenderSnapshotTest {
+    init { AndroidCanvas.install() }
     private val out = File("build/snapshots").apply { mkdirs() }
 
     private fun save(b: Bitmap, name: String) = File(out, name).outputStream().use { b.compress(Bitmap.CompressFormat.PNG, 100, it) }
@@ -34,7 +35,7 @@ class RenderSnapshotTest {
         sim.resize(1600, 1000)
         repeat(900) { sim.update(1.0 / 30) } // 30 s of simulated wall time
         val b = Bitmap.createBitmap(1600, 1000, Bitmap.Config.ARGB_8888)
-        sim.draw(Canvas(b))
+        sim.draw(AndroidCanvas(Canvas(b)))
         save(b, "wallpaper.png")
         assertTrue(sim.eng.rg < 20)
     }
@@ -45,7 +46,7 @@ class RenderSnapshotTest {
         sim.resize(1600, 1000)
         repeat(seconds * 30) { sim.update(1.0 / 30) }
         val b = Bitmap.createBitmap(1600, 1000, Bitmap.Config.ARGB_8888)
-        sim.draw(Canvas(b))
+        sim.draw(AndroidCanvas(Canvas(b)))
         save(b, name)
     }
 
@@ -94,7 +95,7 @@ class RenderSnapshotTest {
                 val t0 = System.nanoTime(); var frames = 0
                 while (System.nanoTime() - t0 < 4_000_000_000L) {
                     val f0 = System.nanoTime()
-                    sim.update(frame / 1000.0); sim.draw(c); frames++
+                    sim.update(frame / 1000.0); sim.draw(AndroidCanvas(c)); frames++
                     val left = frame - (System.nanoTime() - f0) / 1_000_000
                     if (left > 0) Thread.sleep(left)
                 }
@@ -117,7 +118,7 @@ class RenderSnapshotTest {
         sim.selectResidue(42)
         sim.update(1.0 / 30)
         val b = Bitmap.createBitmap(1600, 1000, Bitmap.Config.ARGB_8888)
-        sim.draw(Canvas(b)); save(b, "funnel-inspector.png")
+        sim.draw(AndroidCanvas(Canvas(b))); save(b, "funnel-inspector.png")
         frame("pulling.png", Settings(protein = "ubq", pullPN = 200f, viewStyle = 1), 30)
         frame("assist-hemoglobin.png", Settings(protein = "hemoglobin", assist = 3, viewStyle = 1), 15)
     }

@@ -1,7 +1,5 @@
 package com.hydrophobiccollapse
 
-import android.content.Context
-import android.content.SharedPreferences
 import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.random.Random
@@ -287,16 +285,16 @@ data class Settings(
     /** 0 beads, 1 cartoon, 2 backbone trace, 3 beads with the cartoon on top */
     val viewStyle: Int = 0,
 ) {
-    fun save(p: SharedPreferences) {
-        p.edit()
-            .putString("protein", protein).putInt("temp", temp).putFloat("ph", ph).putInt("salt", salt)
-            .putFloat("redox", redox).putFloat("speed", speed).putInt("cycle", cycle)
-            .putBoolean("hud", hud).putInt("performance", performance).putBoolean("showProgress", showProgress)
-            .putInt("assist", assist).putFloat("urea", urea).putFloat("pullPN", pullPN)
-            .putInt("randomLength", randomLength).putInt("randomStyle", randomStyle).putBoolean("randomOnWake", randomOnWake)
-            .putString("customJson", customJson).putFloat("nativeBias", nativeBias).putInt("crowding", crowding)
-            .putInt("colorBy", colorBy).putInt("viewStyle", viewStyle)
-            .apply()
+    /** Writes every setting to a platform's key–value storage. */
+    fun save(p: KeyValueStore) {
+        p.putString("protein", protein); p.putInt("temp", temp); p.putFloat("ph", ph); p.putInt("salt", salt)
+        p.putFloat("redox", redox); p.putFloat("speed", speed); p.putInt("cycle", cycle)
+        p.putBoolean("hud", hud); p.putInt("performance", performance); p.putBoolean("showProgress", showProgress)
+        p.putInt("assist", assist); p.putFloat("urea", urea); p.putFloat("pullPN", pullPN)
+        p.putInt("randomLength", randomLength); p.putInt("randomStyle", randomStyle); p.putBoolean("randomOnWake", randomOnWake)
+        p.putString("customJson", customJson); p.putFloat("nativeBias", nativeBias); p.putInt("crowding", crowding)
+        p.putInt("colorBy", colorBy); p.putInt("viewStyle", viewStyle)
+        p.commit()
     }
 
     companion object {
@@ -304,41 +302,44 @@ data class Settings(
         const val CMD_HEAT = "cmd_heat"
         const val CMD_RESET = "cmd_reset"
 
-        fun prefs(c: Context): SharedPreferences = c.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-
-        fun load(p: SharedPreferences): Settings {
-            val d = Settings()
-            return Settings(
-                protein = p.getString("protein", d.protein) ?: d.protein,
-                temp = p.getInt("temp", d.temp),
-                ph = p.getFloat("ph", d.ph),
-                salt = p.getInt("salt", d.salt),
-                redox = p.getFloat("redox", d.redox),
-                speed = p.getFloat("speed", d.speed),
-                cycle = p.getInt("cycle", d.cycle),
-                hud = p.getBoolean("hud", d.hud),
-                // Older versions had an on/off battery saver
-                performance = p.getInt("performance", if (p.getBoolean("saver", false)) 0 else d.performance),
-                showProgress = p.getBoolean("showProgress", d.showProgress),
-                assist = p.getInt("assist", d.assist),
-                urea = p.getFloat("urea", d.urea),
-                pullPN = p.getFloat("pullPN", d.pullPN),
-                randomLength = p.getInt("randomLength", d.randomLength),
-                randomStyle = p.getInt("randomStyle", d.randomStyle),
-                randomOnWake = p.getBoolean("randomOnWake", d.randomOnWake),
-                customJson = p.getString("customJson", d.customJson) ?: d.customJson,
-                nativeBias = p.getFloat("nativeBias", d.nativeBias),
-                crowding = p.getInt("crowding", d.crowding),
-                colorBy = p.getInt("colorBy", d.colorBy),
-                viewStyle = p.getInt("viewStyle", d.viewStyle),
-            )
-        }
-
-        /** Ask any running simulation (the wallpaper or the preview) to heat or restart. */
-        fun sendCommand(p: SharedPreferences, key: String) {
-            p.edit().putLong(key, System.nanoTime()).apply()
-        }
+        fun load(p: KeyValueStore, d: Settings = Settings()): Settings = Settings(
+            protein = p.getString("protein", d.protein),
+            temp = p.getInt("temp", d.temp),
+            ph = p.getFloat("ph", d.ph),
+            salt = p.getInt("salt", d.salt),
+            redox = p.getFloat("redox", d.redox),
+            speed = p.getFloat("speed", d.speed),
+            cycle = p.getInt("cycle", d.cycle),
+            hud = p.getBoolean("hud", d.hud),
+            // Older versions had an on/off battery saver
+            performance = p.getInt("performance", if (p.getBoolean("saver", false)) 0 else d.performance),
+            showProgress = p.getBoolean("showProgress", d.showProgress),
+            assist = p.getInt("assist", d.assist),
+            urea = p.getFloat("urea", d.urea),
+            pullPN = p.getFloat("pullPN", d.pullPN),
+            randomLength = p.getInt("randomLength", d.randomLength),
+            randomStyle = p.getInt("randomStyle", d.randomStyle),
+            randomOnWake = p.getBoolean("randomOnWake", d.randomOnWake),
+            customJson = p.getString("customJson", d.customJson),
+            nativeBias = p.getFloat("nativeBias", d.nativeBias),
+            crowding = p.getInt("crowding", d.crowding),
+            colorBy = p.getInt("colorBy", d.colorBy),
+            viewStyle = p.getInt("viewStyle", d.viewStyle),
+        )
     }
+}
+
+/** Key–value storage each platform provides (SharedPreferences on Android, Preferences on the desktop). */
+interface KeyValueStore {
+    fun getString(key: String, default: String): String
+    fun getInt(key: String, default: Int): Int
+    fun getFloat(key: String, default: Float): Float
+    fun getBoolean(key: String, default: Boolean): Boolean
+    fun putString(key: String, value: String)
+    fun putInt(key: String, value: Int)
+    fun putFloat(key: String, value: Float)
+    fun putBoolean(key: String, value: Boolean)
+    fun commit() {}
 }
 
 /** Frames per second the display runs at for a performance setting. */

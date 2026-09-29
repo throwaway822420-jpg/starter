@@ -10,7 +10,7 @@ import android.view.View
 
 /** Live preview of the simulation inside the app's settings screen. */
 class FoldingView(context: Context, attrs: AttributeSet? = null) : View(context, attrs), Choreographer.FrameCallback {
-    val sim = Simulation(resources.displayMetrics.density, wallpaperMode = false)
+    val sim = Simulation(resources.displayMetrics.density, wallpaperMode = false).also { AndroidCanvas.install() }
     private var running = false
     private var lastNs = 0L
 
@@ -39,8 +39,8 @@ class FoldingView(context: Context, attrs: AttributeSet? = null) : View(context,
     }
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) = sim.resize(w, h)
-    override fun onDraw(canvas: Canvas) = sim.draw(canvas)
+    override fun onDraw(canvas: Canvas) = sim.draw(AndroidCanvas(canvas))
 
     @SuppressLint("ClickableViewAccessibility")
-    override fun onTouchEvent(event: MotionEvent): Boolean = sim.onTouch(event)
+    override fun onTouchEvent(event: MotionEvent): Boolean = sim.onPointer(event.toPointer())
 }
