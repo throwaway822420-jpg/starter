@@ -346,4 +346,109 @@ ATOM 7 CA . PHE A 4 ? 26.772 33.436 9.197 2
         val relaxed = endToEnd(0.0); val pulled = endToEnd(200.0)
         assertTrue("ends $relaxed Å apart relaxed, $pulled Å at 200 pN", pulled > 150 && pulled > 3 * relaxed)
     }
+
+    // ---------- Chaperone cage ----------
+    /** Runs the engine for some seconds of wall-clock time, as the app does: steps plus the clock. */
+    private fun run(e: ProteinEngine, seconds: Double) {
+        var t = 0.0
+        while (t < seconds) { e.step(500); e.advanceClock(0.25); t += 0.25 }
+    }
+
+    @Test
+    fun cageForcesMatchTheirEnergy() {
+        val e = ProteinEngine(); e.seed(11)
+        e.load(Proteins.byId("ubq")); e.chaperone = true
+        e.step(3000)
+        assertEquals(CAGE_CAPTURE, e.cagePhase)
+        val capture = gradientError(e)
+        assertTrue("capture forces off by $capture", capture < 1e-5)
+        run(e, 3.5)
+        assertEquals(CAGE_ENCLOSED, e.cagePhase)
+        val enclosed = gradientError(e)
+        assertTrue("enclosed forces off by $enclosed", enclosed < 1e-5)
+    }
+
+    @Test
+    fun cageCyclesThroughCaptureFoldAndRelease() {
+        val e = ProteinEngine(); e.seed(12)
+        e.load(Proteins.byId("trpcage")); e.chaperone = true
+        val seen = ArrayList<Int>()
+        repeat(60) { e.advanceClock(0.25); if (seen.lastOrNull() != e.cagePhase) seen.add(e.cagePhase) }
+        assertEquals(listOf(CAGE_CAPTURE, CAGE_ENCLOSED, CAGE_RELEASE, CAGE_CAPTURE), seen.take(4))
+        assertTrue(e.cageCycles >= 1)
+        e.chaperone = false
+        assertEquals(CAGE_OFF, e.cagePhase)
+    }
+
+    @Test
+    fun closedCageHoldsTheChainInside() {
+        val e = ProteinEngine(); e.seed(13)
+        e.load(Proteins.byId("ubq")); e.temperature = 300.0; e.chaperone = true
+        run(e, 7.0)                                   // captured, then a few seconds with the lid on
+        assertEquals(CAGE_ENCLOSED, e.cagePhase)
+        val r = e.cageRadius; val hh = e.cageHalfHeight
+        for (i in 0 until e.n) {
+            val rho = Math.hypot(e.x[i], e.z[i])
+            assertTrue("residue $i is ${rho - r} Å through the wall", rho < r + 3)
+            assertTrue("residue $i is outside the ends (y = ${e.y[i]})", abs(e.y[i]) < hh + 3)
+        }
+    }
+
+    @Test
+    fun releasePushesTheChainOutOfTheOpenEnd() {
+        val e = ProteinEngine(); e.seed(14)
+        e.load(Proteins.byId("trpcage")); e.temperature = 300.0; e.chaperone = true
+        run(e, 11.2)                                  // capture 3 s + enclosed 8 s: just into the release
+        assertEquals(CAGE_RELEASE, e.cagePhase)
+        e.updateCenter(); val before = e.center[1]
+        run(e, 2.0)
+        e.updateCenter()
+        assertTrue("centre moved from $before to ${e.center[1]}", e.center[1] < before - 5)
+    }
+
+    // ---------- Recording and PDB files ----------
+    @Test
+    fun recordingKeepsFramesAndDropsTheOldest() {
+        val e = ProteinEngine(); e.seed(15)
+        e.load(Proteins.byId("trpcage"))
+        val rec = Recording(e.n)
+        repeat(rec.capacity + 5) { e.step(20); e.advanceClock(Recording.INTERVAL); rec.add(e, 0.5, 300.0) }
+        assertEquals(rec.capacity, rec.size)
+        val last = rec[rec.size - 1]
+        assertEquals(e.x[3].toFloat(), last.xyz[9], 1e-4f)
+        assertEquals(e.time, last.time, 1e-9)
+        assertEquals((rec.capacity - 1) * Recording.INTERVAL, rec.seconds, 1e-6)
+    }
+
+    @Test
+    fun writesReadablePdbFiles() {
+        val e = ProteinEngine(); e.seed(16)
+        e.load(Proteins.byId("insulin")); e.step(2000); e.measure()
+        val rec = Recording(e.n)
+        repeat(3) { e.step(200); e.advanceClock(Recording.INTERVAL); rec.add(e, 0.0, 300.0) }
+        val text = PdbWriter.write(e, "Insulin", List(rec.size) { rec[it] })
+        val atoms = text.lines().filter { it.startsWith("ATOM  ") }
+        assertEquals(3 * e.n, atoms.size)
+        assertEquals(3, text.lines().count { it.startsWith("MODEL ") })
+        assertTrue(atoms.all { it.length == 78 && it.substring(12, 16) == " CA " })
+        // Columns as the PDB format fixes them: residue name, chain, number, coordinates
+        val first = atoms[0]
+        assertEquals(e.residueName3(0), first.substring(17, 20))
+        assertEquals("A", first.substring(21, 22)); assertEquals(1, first.substring(22, 26).trim().toInt())
+        first.substring(30, 38).trim().toDouble(); first.substring(46, 54).trim().toDouble()
+        val chainB = atoms.first { it.substring(21, 22) == "B" }
+        assertEquals(1, chainB.substring(22, 26).trim().toInt())
+        assertTrue(text.lines().any { it.startsWith("TER ") })
+        assertTrue(text.trimEnd().endsWith("END"))
+        // Each frame is centred on its centre of mass
+        val xs = atoms.take(e.n).map { it.substring(30, 38).trim().toDouble() }
+        assertEquals(0.0, xs.average(), 0.01)
+        // One frame: no MODEL records
+        val single = PdbWriter.write(e, "Insulin", listOf(rec[0]))
+        assertTrue(single.lines().none { it.startsWith("MODEL") })
+        // The app's own reader gets the chains and positions back
+        val chains = StructureIO.parsePdb(single)
+        assertEquals(Proteins.byId("insulin").chains, chains.map { it.seq })
+        assertEquals(rec[0].xyz[3] - rec[0].xyz.filterIndexed { k, _ -> k % 3 == 0 }.average().toFloat(), chains[0].ca[3], 2e-3f)
+    }
 }

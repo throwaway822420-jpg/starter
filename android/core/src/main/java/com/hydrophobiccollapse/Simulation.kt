@@ -24,6 +24,9 @@ import kotlin.math.roundToInt
 import kotlin.math.sin
 import kotlin.math.sqrt
 
+private const val EFFECTS_MAX = 1200     // depth of field and sparks only up to this many residues
+private const val SPARK_LIFE = 0.8        // s
+
 /**
  * The folding simulation plus everything around it: the heat cycle, the camera, drawing and touch.
  * Shared by the Android wallpaper, its settings preview, and the Windows app.
@@ -130,12 +133,14 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         eng.nativeBias = s.nativeBias.toDouble()
         eng.crowding = s.crowding
         eng.assist = s.assist; eng.urea = s.urea.toDouble(); eng.pullPN = s.pullPN.toDouble()
+        eng.chaperone = s.chaperone
         val reload = when {
             !loaded -> true
             s.protein == Proteins.RANDOM_ID -> old.protein != s.protein || old.randomLength != s.randomLength || old.randomStyle != s.randomStyle
             else -> Proteins.byId(s.protein, s.customJson).signature != protein.signature || old.protein != s.protein
         }
         if (reload) load()
+        if (!s.effects) sparks.clear()
         syncPhysicsThread()
     }
     /** Start again from an unfolded chain; in random mode, with a brand-new protein. */
@@ -160,6 +165,9 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         q0 = if (eng.q.isNaN()) 0.0 else min(eng.q, 0.6); r0 = if (eng.rmsd.isNaN()) 20.0 else max(eng.rmsd, 6.0); rg0 = eng.rg
         progress = 0.0; foldedNoted = false; foldStart = eng.time
         funLen = 0; funHead = 0; selected = -1; selectedInfo = null
+        recording = Recording(n); replaying = false; recordAcc = 0.0
+        sparks.clear(); prevContacts.clear(); lastSpark.clear(); havePrevContacts = false
+        userZoom = 1.0
         takeSnapshot()
         loaded = true
     }
@@ -167,14 +175,28 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
     // ---------- Snapshot of what the physics thread changes, for drawing ----------
     private var snapX = DoubleArray(0); private var snapY = DoubleArray(0); private var snapZ = DoubleArray(0)
     private var snapQ = DoubleArray(0)
+    private var snapSS = IntArray(0)
+    private var snapDisulfides: List<IntArray> = emptyList()
     private var snapFlashes = ArrayList<Flash>()
     private var snapEvents = ArrayList<ChemEvent>()
+    private var snapCagePhase = CAGE_OFF
+    private var snapCageProgress = 0.0
+    private var snapCageR = 0.0
+    private var snapCageH = 0.0
+    private fun ensureSnapArrays(n: Int) {
+        if (snapX.size != n) { snapX = DoubleArray(n); snapY = DoubleArray(n); snapZ = DoubleArray(n); snapQ = DoubleArray(n); snapSS = IntArray(n) }
+    }
     private fun takeSnapshot() {
         val n = eng.n
-        if (snapX.size != n) { snapX = DoubleArray(n); snapY = DoubleArray(n); snapZ = DoubleArray(n); snapQ = DoubleArray(n) }
+        ensureSnapArrays(n)
         System.arraycopy(eng.x, 0, snapX, 0, n); System.arraycopy(eng.y, 0, snapY, 0, n); System.arraycopy(eng.z, 0, snapZ, 0, n)
         System.arraycopy(eng.charge, 0, snapQ, 0, n)
+        System.arraycopy(eng.ss, 0, snapSS, 0, n)
+        snapDisulfides = ArrayList(eng.disulfides)
         snapFlashes = ArrayList(eng.flashes); snapEvents = ArrayList(eng.events)
+        snapCagePhase = eng.cagePhase; snapCageProgress = eng.cageProgress
+        snapCageR = eng.cageRadius; snapCageH = eng.cageHalfHeight
+        shownProgress = progress
     }
 
     // ---------- Extreme performance: a physics thread that never waits for the display ----------
@@ -197,9 +219,11 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         val me = Thread.currentThread()
         var batch = 10
         while (physicsThread === me) {
+            if (replaying) { java.util.concurrent.locks.LockSupport.parkNanos(5_000_000L); continue }
             lock.lock()
             try {
                 if (physicsThread !== me) break
+                if (replaying) continue
                 val t0 = System.nanoTime()
                 eng.step(batch)
                 msPerStep = 0.9 * msPerStep + 0.1 * ((System.nanoTime() - t0) / 1e6 / batch)
@@ -252,8 +276,17 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
     private val view = DoubleArray(3)
     private var pageYaw = 0.0
     private var pageYawTarget = 0.0
+    private var userZoom = 1.0
     private fun cam() = max(140.0, 5 * eng.rg)
-    private fun fitZoom() = min(w, h) * 0.42 / max(2.2 * eng.rg, 16.0)
+    private fun fitZoom(): Double {
+        var extent = max(2.2 * eng.rg, 16.0)
+        if (eng.cagePhase != CAGE_OFF) extent = max(extent, 1.25 * eng.cageHalfHeight)
+        return min(w, h) * 0.42 / extent * userZoom
+    }
+    /** Turn the molecule (drag, arrow keys). */
+    fun rotateBy(dYaw: Double, dPitch: Double) = lock.withLock { yaw += dYaw; pitch = (pitch + dPitch).coerceIn(-1.3, 1.3) }
+    /** Zoom in (factor > 1) or out, on top of the automatic fit. */
+    fun zoomBy(factor: Double) = lock.withLock { userZoom = (userZoom * factor).coerceIn(0.35, 5.0) }
 
     /** Home-screen page swipes turn the molecule (xOffset runs 0…1 across the pages). */
     fun setPageOffset(xOffset: Float) { pageYawTarget = (xOffset - 0.5) * 1.6 }
@@ -334,6 +367,11 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         if (!loaded) return@withLock
         val dt = min(dt0, 0.1)
         clock += dt
+        if (replaying) {
+            // The engine waits while a recording plays; the camera and the water keep moving
+            updateReplay(dt)
+            if (replaying) { updateCamera(dt); updateSolvent(dt); return@withLock }
+        }
         updateSchedule(dt)
         eng.advanceClock(dt)
         if (physicsThread != null) {
@@ -357,17 +395,14 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         measureAcc += dt
         if (eng.n <= 400 || measureAcc >= 0.25) {
             eng.measure(); measureAcc = 0.0
+            if (settings.effects && eng.n <= EFFECTS_MAX) detectSparks()
             progress += (rawProgress() - progress) * min(1.0, 0.5 * max(dt, 0.25))
             if (!foldedNoted && progress > 0.985 && phase != Phase.HEAT && phase != Phase.HOT) {
                 foldedNoted = true
                 note("${if (progressIsFolding) "Folded" else "Collapsed"} in ${(eng.time - foldStart).roundToInt()} s")
             }
         } else eng.updateCenter()
-        // Camera: follow the centre, zoom to fit, turn slowly unless a finger is on it
-        for (k in 0..2) view[k] += (eng.center[k] - view[k]) * min(1.0, dt * 3)
-        zoom += (fitZoom() - zoom) * min(1.0, dt * 1.2)
-        if (downId < 0) yaw += dt * 0.12
-        pageYaw += (pageYawTarget - pageYaw) * min(1.0, dt * 4)
+        updateCamera(dt)
         updateSolvent(dt)
         takeSnapshot()
         if (selected >= 0) {
@@ -385,7 +420,144 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
                 funHead = (funHead + 1) % funQ.size; if (funLen < funQ.size) funLen++
             }
         }
+        recordAcc += dt
+        if (recordAcc >= Recording.INTERVAL) { recordAcc -= Recording.INTERVAL; recording.add(eng, progress, temperature) }
     }
+
+    /** Camera: follow the protein (or the chaperone cage), zoom to fit, turn slowly unless a finger is on it. */
+    private fun updateCamera(dt: Double) {
+        val target = when {
+            replaying -> replayCenter
+            eng.cagePhase != CAGE_OFF -> origin
+            else -> eng.center
+        }
+        for (k in 0..2) view[k] += (target[k] - view[k]) * min(1.0, dt * 3)
+        zoom += (fitZoom() - zoom) * min(1.0, dt * 1.2)
+        if (downId < 0 && !(replaying && replayPaused)) yaw += dt * 0.12
+        pageYaw += (pageYawTarget - pageYaw) * min(1.0, dt * 4)
+    }
+    private val origin = DoubleArray(3)
+
+    // ---------- Time-lapse replay: the recent past, sped up; the camera stays free to turn and zoom ----------
+    private var recording = Recording(0)
+    private var recordAcc = 0.0
+    /** True while a recording plays instead of the live simulation. */
+    @Volatile var replaying = false; private set
+    private var replayPos = 0.0                  // frame index, fractional
+    var replayPaused = false; private set
+    private var scrubbing = false
+    private val replayCenter = DoubleArray(3)
+    private var shownProgress = 0.0
+    /** Seconds of simulation recorded so far (a replay needs a couple). */
+    val recordedSeconds get() = recording.seconds
+    fun startReplay(): Boolean = lock.withLock {
+        if (!loaded || recording.size < 8) return@withLock false
+        replaying = true; replayPos = 0.0; replayPaused = false; scrubbing = false
+        eng.grab = -1; selected = -1; selectedInfo = null; sparks.clear()
+        showReplayFrame()
+        true
+    }
+    fun stopReplay() = lock.withLock {
+        if (!replaying) return@withLock
+        replaying = false; scrubbing = false; replayPaused = false
+        takeSnapshot()
+    }
+    fun toggleReplay() = lock.withLock { if (replaying) stopReplay() else startReplay() }
+    fun toggleReplayPause() = lock.withLock { if (replaying) replayPaused = !replayPaused }
+    /** Jump forward or back through a replay by some seconds of simulation. */
+    fun scrubReplay(seconds: Double) = lock.withLock {
+        if (!replaying) return@withLock
+        replayPos = (replayPos + seconds / Recording.INTERVAL).coerceIn(0.0, recording.size - 1.0)
+        showReplayFrame()
+    }
+    /** The chosen speed, slowed for short recordings so a replay always lasts at least four seconds. */
+    private fun replaySpeed() = min(settings.replaySpeed.toDouble(), max(1.0, recording.seconds / 4))
+    private fun updateReplay(dt: Double) {
+        if (!replayPaused && !scrubbing) {
+            replayPos += dt * replaySpeed() / Recording.INTERVAL
+            if (replayPos >= recording.size - 1) {
+                // The end of the recording is exactly where the live simulation paused: carry on from there
+                stopReplay(); return
+            }
+        }
+        showReplayFrame()
+    }
+    /** Fills the drawing snapshot from the recording, blending the two frames either side of the play position. */
+    private fun showReplayFrame() {
+        if (recording.size == 0) return
+        val k0 = floor(replayPos).toInt().coerceIn(0, recording.size - 1)
+        val k1 = min(k0 + 1, recording.size - 1)
+        val t = (replayPos - k0).toFloat().coerceIn(0f, 1f)
+        val a = recording[k0]; val b = recording[k1]
+        val n = eng.n
+        ensureSnapArrays(n)
+        var cx = 0.0; var cy = 0.0; var cz = 0.0
+        for (i in 0 until n) {
+            val x = a.xyz[3 * i] + (b.xyz[3 * i] - a.xyz[3 * i]) * t
+            val y = a.xyz[3 * i + 1] + (b.xyz[3 * i + 1] - a.xyz[3 * i + 1]) * t
+            val z = a.xyz[3 * i + 2] + (b.xyz[3 * i + 2] - a.xyz[3 * i + 2]) * t
+            snapX[i] = x.toDouble(); snapY[i] = y.toDouble(); snapZ[i] = z.toDouble()
+            cx += x; cy += y; cz += z
+        }
+        val near = if (t < 0.5f) a else b
+        for (i in 0 until n) { snapQ[i] = near.charge[i].toDouble(); snapSS[i] = near.ss[i].toInt() }
+        snapDisulfides = List(near.disulfides.size / 3) { k -> intArrayOf(near.disulfides[3 * k], near.disulfides[3 * k + 1], near.disulfides[3 * k + 2]) }
+        snapFlashes = ArrayList(); snapEvents = ArrayList()
+        snapCagePhase = near.cagePhase
+        snapCageProgress = (if (a.cagePhase == b.cagePhase) a.cageProgress + (b.cageProgress - a.cageProgress) * t else near.cageProgress).toDouble()
+        snapCageR = eng.cageRadiusFor(snapCagePhase); snapCageH = 1.15 * snapCageR
+        temperature = (a.temperature + (b.temperature - a.temperature) * t).toDouble()
+        shownProgress = (a.progress + (b.progress - a.progress) * t).toDouble()
+        if (snapCagePhase != CAGE_OFF) replayCenter.fill(0.0)
+        else { replayCenter[0] = cx / n; replayCenter[1] = cy / n; replayCenter[2] = cz / n }
+    }
+    /** Seconds before the end of the recording that the replay is showing. */
+    private fun replayAgo(): Double {
+        if (recording.size == 0) return 0.0
+        val k0 = floor(replayPos).toInt().coerceIn(0, recording.size - 1)
+        val k1 = min(k0 + 1, recording.size - 1)
+        val t = recording[k0].time + (recording[k1].time - recording[k0].time) * (replayPos - k0)
+        return recording[recording.size - 1].time - t
+    }
+
+    // ---------- Saving: the current shape, or the recorded fold, as a PDB file ----------
+    /** The current structure as a PDB file (Cα atoms only). */
+    fun exportPdb(): String = lock.withLock {
+        val now = Recording(eng.n).apply { add(eng, progress, temperature) }
+        PdbWriter.write(eng, protein.name, listOf(now[0]))
+    }
+    /** The recorded fold as a multi-model PDB trajectory, or null with nothing recorded yet. */
+    fun exportTrajectoryPdb(): String? = lock.withLock {
+        if (recording.size < 2) return@withLock null
+        PdbWriter.write(eng, protein.name, List(recording.size) { recording[it] })
+    }
+
+    // ---------- Sparks where new contacts form (with the effects setting) ----------
+    private class Spark(val i: Int, val j: Int, val t: Double)
+    private val sparks = ArrayList<Spark>()
+    private val lastSpark = HashMap<Long, Double>()     // pairs that flicker in and out of contact spark once
+    private var prevContacts = HashSet<Long>()
+    private var curContacts = HashSet<Long>()
+    private var havePrevContacts = false
+    private fun detectSparks() {
+        val ca = eng.contacts.a; val cb = eng.contacts.b; val m = eng.contacts.size
+        curContacts.clear()
+        var added = 0
+        sparks.removeAll { clock - it.t > SPARK_LIFE }
+        for (p in 0 until m) {
+            val i = ca[p]; val j = cb[p]
+            if (eng.chainOf[i] == eng.chainOf[j] && abs(j - i) < 4) continue
+            val key = (i.toLong() shl 32) or j.toLong()
+            curContacts.add(key)
+            if (havePrevContacts && key !in prevContacts && added < 2 && sparks.size < 24 && clock - (lastSpark[key] ?: -1e9) > 4.0) {
+                sparks.add(Spark(i, j, clock)); lastSpark[key] = clock; added++
+            }
+        }
+        val swap = prevContacts; prevContacts = curContacts; curContacts = swap
+        if (lastSpark.size > 4000) lastSpark.values.removeAll { clock - it > 4.0 }
+        havePrevContacts = true
+    }
+
 
     // ---------- Drawing ----------
     private val bg = Paint()
@@ -434,12 +606,17 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         val zspan = max(1.0, zmax - zmin)
 
         zMin = zmin; zSpan = zspan
+        dof = settings.effects && n <= EFFECTS_MAX
         val byChain = colourByChain()
+        val cageOn = snapCagePhase != CAGE_OFF
+        if (cageOn) drawCage(c, front = false)
         when (settings.viewStyle) {
             0 -> drawBeads(c, byChain, big)
             3 -> { drawBeads(c, byChain, big, overlay = true); drawCartoon(c, byChain, ribbons = true, alpha = 0.88f) }
             else -> drawCartoon(c, byChain, ribbons = settings.viewStyle == 1)
         }
+        if (cageOn) drawCage(c, front = true)
+        if (dof) drawSparks(c)
 
         // Reaction flashes: proton transfers (small rings) and disulfide chemistry (sulfur bursts)
         for (f in snapFlashes) {
@@ -470,14 +647,15 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
             if (eng.chainStart[ch + 1] - s0 > 1) label(s0, s0 + 1, eng.chainLetter(ch).toString())
         }
 
-        drawPull(c)
-        if (selected in 0 until n) {
+        if (!replaying) drawPull(c)
+        if (selected in 0 until n && !replaying) {
             stroke.color = withAlpha(Col.TEXT, 0.9f); stroke.strokeWidth = 2 * density
             c.drawCircle(px[selected], py[selected], max(pr[selected], 4 * density) + 6 * density, stroke)
         }
-        if (settings.hud) drawHud(c)
+        if (settings.hud && !replaying) drawHud(c)
         if (settings.showProgress) drawProgress(c)
-        selectedInfo?.let { if (selected in 0 until n) drawInspector(c, it) }
+        if (!replaying) selectedInfo?.let { if (selected in 0 until n) drawInspector(c, it) }
+        if (replaying) drawReplayBar(c)
     }
 
     /** Optical tweezers: arrows on the two pulled ends, and how far apart they are. */
@@ -568,6 +746,7 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         val x0 = (w - pw) / 2; val y0 = topInset + (if (wallpaperMode) dp(28f) else dp(16f))
         fill.color = Col.PANEL; c.drawRoundRect(x0, y0, x0 + pw, y0 + ph, dp(9f), dp(9f), fill)
         stroke.color = Col.LINE; stroke.strokeWidth = density; c.drawRoundRect(x0, y0, x0 + pw, y0 + ph, dp(9f), dp(9f), stroke)
+        val progress = shownProgress
         val pct = (progress * 100).roundToInt()
         text.textAlign = Paint.Align.LEFT; text.typeface = sans; text.textSize = dp(11f); text.color = Col.HAZE; text.letterSpacing = 0.04f
         c.drawText((if (progressIsFolding) "Folded" else "Collapsed") + (if (settings.assist > 0) " · assisted" else ""), x0 + dp(12f), y0 + dp(15f), text)
@@ -586,6 +765,9 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
     private var zSpan = 1.0
     private fun near(zv: Double) = ((zv - zMin) / zSpan).toFloat().coerceIn(0f, 1f)
     private fun fog(col: Int, zv: Double) = mix(Col.INK, col, 0.35f + 0.65f * near(zv))
+    // Depth of field (effects setting): the front of the molecule is in focus, the back softens
+    private var dof = false
+    private fun blurAt(nearness: Float): Float { if (!dof) return 0f; val f = 1 - nearness; return (f * f * 1.15f).coerceIn(0f, 1f) }
 
     // ---------- Style 0: beads on a backbone ----------
     private fun drawBeads(c: Canvas, byChain: Boolean, big: Boolean, overlay: Boolean = false) {
@@ -598,7 +780,42 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
             for (k in 0 until m) { val i = (keys[k] and 0xFFFFFFFFL).toInt(); drawResidue(c, i, fog(drawColor(i, byChain), pz[i]), near(pz[i]), big, alpha = 0.55f, scale = 0.8f) }
             return
         }
-        // Hydrophobic contacts and salt bridges sit underneath everything
+        // Hydrophobic contacts and salt bridges sit underneath everything (live only: a replay doesn't record them)
+        if (!replaying) drawContacts(c)
+
+        // Depth-sorted backbone segments (id < n), disulfides (n..n+63) and residues (n+64…)
+        var m = 0
+        for (i in 0 until n - 1) if (eng.chainOf[i] == eng.chainOf[i + 1]) keys[m++] = depthKey((pz[i] + pz[i + 1]) / 2 - 0.01, i)
+        val ssList = snapDisulfides
+        for (k in 0 until min(ssList.size, 64)) { val d = ssList[k]; keys[m++] = depthKey((pz[d[0]] + pz[d[1]]) / 2 - 0.02, n + k) }
+        for (i in 0 until n) keys[m++] = depthKey(pz[i], n + 64 + i)
+        java.util.Arrays.sort(keys, 0, m)
+        for (k in 0 until m) {
+            val id = (keys[k] and 0xFFFFFFFFL).toInt()
+            when {
+                id < n -> {
+                    val i = id; val a = snapSS[i]; val b = snapSS[i + 1]
+                    val kind = if (a == b) a else 0
+                    val col = if (byChain) chainCol[i] else when (kind) { 1 -> Col.HELIX; 2 -> Col.STRAND; else -> Col.BOND }
+                    val zc = (pz[i] + pz[i + 1]) / 2
+                    val width = (if (kind != 0) 1.3f else 0.55f) * (ps[i] + ps[i + 1]) / 2
+                    val bl = blurAt(near(zc))
+                    if (bl > 0.06f) {
+                        stroke.color = withAlpha(fog(col, zc), 0.22f); stroke.strokeWidth = width * (1 + 1.2f * bl)
+                        c.drawLine(px[i], py[i], px[i + 1], py[i + 1], stroke)
+                    }
+                    stroke.color = withAlpha(fog(col, zc), 1 - 0.4f * bl)
+                    stroke.strokeWidth = width
+                    c.drawLine(px[i], py[i], px[i + 1], py[i + 1], stroke)
+                }
+                id < n + 64 -> drawDisulfide(c, ssList.getOrNull(id - n))
+                else -> { val i = id - n - 64; drawResidue(c, i, fog(drawColor(i, byChain), pz[i]), near(pz[i]), big) }
+            }
+        }
+    }
+
+    private fun drawContacts(c: Canvas) {
+        val n = eng.n
         stroke.strokeCap = Paint.Cap.ROUND
         stroke.color = withAlpha(Col.HYDRO, 0.16f); stroke.strokeWidth = max(0.6f * density, (zoom * 0.18).toFloat())
         val ca = eng.contacts.a; val cb = eng.contacts.b
@@ -612,29 +829,6 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         }
         dash.color = withAlpha(Col.TEXT, 0.35f)
         for (b in eng.bridges) if (b[0] < n && b[1] < n) c.drawLine(px[b[0]], py[b[0]], px[b[1]], py[b[1]], dash)
-
-        // Depth-sorted backbone segments (id < n), disulfides (n..n+63) and residues (n+64…)
-        var m = 0
-        for (i in 0 until n - 1) if (eng.chainOf[i] == eng.chainOf[i + 1]) keys[m++] = depthKey((pz[i] + pz[i + 1]) / 2 - 0.01, i)
-        val ssList = eng.disulfides
-        for (k in 0 until min(ssList.size, 64)) { val d = ssList[k]; keys[m++] = depthKey((pz[d[0]] + pz[d[1]]) / 2 - 0.02, n + k) }
-        for (i in 0 until n) keys[m++] = depthKey(pz[i], n + 64 + i)
-        java.util.Arrays.sort(keys, 0, m)
-        for (k in 0 until m) {
-            val id = (keys[k] and 0xFFFFFFFFL).toInt()
-            when {
-                id < n -> {
-                    val i = id; val a = eng.ss[i]; val b = eng.ss[i + 1]
-                    val kind = if (a == b) a else 0
-                    val col = if (byChain) chainCol[i] else when (kind) { 1 -> Col.HELIX; 2 -> Col.STRAND; else -> Col.BOND }
-                    stroke.color = fog(col, (pz[i] + pz[i + 1]) / 2)
-                    stroke.strokeWidth = (if (kind != 0) 1.3f else 0.55f) * (ps[i] + ps[i + 1]) / 2
-                    c.drawLine(px[i], py[i], px[i + 1], py[i + 1], stroke)
-                }
-                id < n + 64 -> drawDisulfide(c, ssList.getOrNull(id - n))
-                else -> { val i = id - n - 64; drawResidue(c, i, fog(drawColor(i, byChain), pz[i]), near(pz[i]), big) }
-            }
-        }
     }
 
     private fun drawDisulfide(c: Canvas, d: IntArray?) {
@@ -694,7 +888,7 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
             val len = sqrt(nx * nx + ny * ny + nz * nz)
             if (len < 1e-6) { if (i > 0 && ch[i - 1] == ch[i]) { nx = resNx[i - 1]; ny = resNy[i - 1]; nz = resNz[i - 1] } else { nx = 0.0; ny = 1.0; nz = 0.0 } }
             else { nx /= len; ny /= len; nz /= len }
-            if (i > 0 && ch[i - 1] == ch[i] && eng.ss[i] != 1 && nx * resNx[i - 1] + ny * resNy[i - 1] + nz * resNz[i - 1] < 0) { nx = -nx; ny = -ny; nz = -nz }
+            if (i > 0 && ch[i - 1] == ch[i] && snapSS[i] != 1 && nx * resNx[i - 1] + ny * resNy[i - 1] + nz * resNz[i - 1] < 0) { nx = -nx; ny = -ny; nz = -nz }
             resNx[i] = nx; resNy[i] = ny; resNz[i] = nz
         }
         for (i in 0 until n) if (eng.chainStart.contains(i) && i + 1 < n && ch[i + 1] == ch[i]) { resNx[i] = resNx[i + 1]; resNy[i] = resNy[i + 1]; resNz[i] = resNz[i + 1] }
@@ -733,12 +927,12 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
     /** Half-width of the ribbon at position u (in residues) for a segment starting at u0, Å; 0 means a thin tube. */
     private fun halfWidth(u: Double, u0: Double): Double {
         val i = (u0 + 0.5).toInt().coerceIn(0, eng.n - 1)   // the residue this segment belongs to
-        val kind = eng.ss[i]
+        val kind = snapSS[i]
         return when (kind) {
             1 -> 1.5
             2 -> {
                 // Arrowhead over the last residue step of a strand
-                var e = i; while (e + 1 < eng.n && eng.ss[e + 1] == 2 && eng.chainOf[e + 1] == eng.chainOf[i]) e++
+                var e = i; while (e + 1 < eng.n && snapSS[e + 1] == 2 && eng.chainOf[e + 1] == eng.chainOf[i]) e++
                 if (u0 >= e - 1 - 1e-6) 2.6 * (e - u).coerceIn(0.0, 1.0) + 0.1 else 1.5
             }
             else -> 0.0
@@ -756,7 +950,7 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
             projectPoint(spX[k + 1], spY[k + 1], spZ[k + 1])
             keys[cnt++] = depthKey((z0 + tpz) / 2, k)
         }
-        val ssList = eng.disulfides
+        val ssList = snapDisulfides
         for (k in 0 until min(ssList.size, 64)) { val d = ssList[k]; keys[cnt++] = depthKey((pz[d[0]] + pz[d[1]]) / 2 + 0.5, m + k) }
         java.util.Arrays.sort(keys, 0, cnt)
         for (q in 0 until cnt) {
@@ -765,18 +959,24 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
             val k = id
             val u0 = spU[k]; val u1 = spU[k + 1]
             val res = (u0 + 0.5).toInt().coerceIn(0, n - 1)
-            val kind = if (ribbons) eng.ss[res] else 0
+            val kind = if (ribbons) snapSS[res] else 0
             val base = if (byChain) chainCol[res] else when (kind) { 1 -> Col.HELIX; 2 -> Col.STRAND; else -> if (ribbons) Col.SPECIAL else residueColor(res) }
             val hw0 = if (ribbons) halfWidth(u0, u0) else 0.0
             val hw1 = if (ribbons) halfWidth(u1, u0) else 0.0
             projectPoint(spX[k], spY[k], spZ[k]); val ax = tpx; val ay = tpy; val az = tpz; val aS = tps
             projectPoint(spX[k + 1], spY[k + 1], spZ[k + 1]); val bx = tpx; val by = tpy; val bz = tpz; val bS = tps
             val zc = (az + bz) / 2
+            val bl = blurAt(near(zc))
             if (hw0 == 0.0 && hw1 == 0.0) {
                 // Loops and the plain trace: a round tube
                 stroke.strokeCap = Paint.Cap.ROUND
-                stroke.color = withAlpha(fog(base, zc), alpha)
-                stroke.strokeWidth = (if (ribbons) 0.7f else 0.9f) * (aS + bS) / 2
+                val width = (if (ribbons) 0.7f else 0.9f) * (aS + bS) / 2
+                if (bl > 0.06f) {
+                    stroke.color = withAlpha(fog(base, zc), alpha * 0.22f); stroke.strokeWidth = width * (1 + 1.2f * bl)
+                    c.drawLine(ax, ay, bx, by, stroke)
+                }
+                stroke.color = withAlpha(fog(base, zc), alpha * (1 - 0.4f * bl))
+                stroke.strokeWidth = width
                 c.drawLine(ax, ay, bx, by, stroke)
                 continue
             }
@@ -786,13 +986,21 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
             projectPoint(spX[k + 1] + spWx[k + 1] * hw1, spY[k + 1] + spWy[k + 1] * hw1, spZ[k + 1] + spWz[k + 1] * hw1); val l1x = tpx; val l1y = tpy
             projectPoint(spX[k + 1] - spWx[k + 1] * hw1, spY[k + 1] - spWy[k + 1] * hw1, spZ[k + 1] - spWz[k + 1] * hw1); val r1x = tpx; val r1y = tpy
             val light = 0.45f + 0.55f * facing(spNx[k], spNy[k], spNz[k])
-            fill.color = withAlpha(mix(Col.INK, fog(base, zc), light), alpha)
+            val faceCol = mix(Col.INK, fog(base, zc), light)
             quad.reset(); quad.moveTo(l0x, l0y); quad.lineTo(l1x, l1y); quad.lineTo(r1x, r1y); quad.lineTo(r0x, r0y); quad.close()
+            if (bl > 0.06f) {
+                // Out of focus: a soft, spread edge around a slightly fainter face
+                stroke.strokeCap = Paint.Cap.ROUND; stroke.strokeWidth = (1 + 6 * bl) * density
+                stroke.color = withAlpha(faceCol, alpha * 0.3f); c.drawPath(quad, stroke)
+            }
+            fill.color = withAlpha(faceCol, alpha * (1 - 0.3f * bl))
             c.drawPath(quad, fill)
             // A fine outline on the edges keeps thin, edge-on ribbons visible
-            stroke.strokeCap = Paint.Cap.BUTT; stroke.strokeWidth = 0.7f * density
-            stroke.color = withAlpha(fog(base, zc), alpha)
-            c.drawLine(l0x, l0y, l1x, l1y, stroke); c.drawLine(r0x, r0y, r1x, r1y, stroke)
+            if (bl < 0.3f) {
+                stroke.strokeCap = Paint.Cap.BUTT; stroke.strokeWidth = 0.7f * density
+                stroke.color = withAlpha(fog(base, zc), alpha)
+                c.drawLine(l0x, l0y, l1x, l1y, stroke); c.drawLine(r0x, r0y, r1x, r1y, stroke)
+            }
         }
         stroke.strokeCap = Paint.Cap.ROUND
         // The residue being pulled
@@ -805,13 +1013,23 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
 
     private fun drawResidue(c: Canvas, i: Int, col: Int, nearness: Float, big: Boolean, alpha: Float = 1f, scale: Float = 1f) {
         val r = pr[i] * scale; val x = px[i]; val y = py[i]
-        fill.color = withAlpha(col, alpha); c.drawCircle(x, y, r, fill)
-        if (!big) {
-            stroke.color = withAlpha(0x04060C, 0.45f * alpha); stroke.strokeWidth = density; c.drawCircle(x, y, r, stroke)
-            fill.color = withAlpha(0xFFFFFF, (0.1f + 0.2f * nearness) * alpha); c.drawCircle(x - r * 0.3f, y - r * 0.3f, r * 0.38f, fill)
+        val bl = blurAt(nearness)
+        if (bl > 0.06f) {
+            // Out of focus: a fainter disc inside two soft halos, with no sharp outline or highlight
+            fill.color = withAlpha(col, 0.16f * alpha); c.drawCircle(x, y, r * (1 + 0.6f * bl), fill)
+            fill.color = withAlpha(col, 0.22f * alpha); c.drawCircle(x, y, r * (1 + 0.3f * bl), fill)
+            fill.color = withAlpha(col, alpha * (1 - 0.45f * bl)); c.drawCircle(x, y, r * (1 - 0.08f * bl), fill)
+        } else {
+            // In focus; the nearest residues glow faintly
+            if (dof && nearness > 0.88f) { fill.color = withAlpha(col, 0.14f * alpha); c.drawCircle(x, y, r * 1.5f, fill) }
+            fill.color = withAlpha(col, alpha); c.drawCircle(x, y, r, fill)
+            if (!big) {
+                stroke.color = withAlpha(0x04060C, 0.45f * alpha); stroke.strokeWidth = density; c.drawCircle(x, y, r, stroke)
+                fill.color = withAlpha(0xFFFFFF, (0.1f + 0.2f * nearness) * alpha); c.drawCircle(x - r * 0.3f, y - r * 0.3f, r * 0.38f, fill)
+            }
         }
         val q = snapQ[i]
-        if (abs(q) > 0.5 && r > 5 * density) {
+        if (abs(q) > 0.5 && r > 5 * density && bl < 0.3f) {
             stroke.color = withAlpha(0x04060C, 0.75f * alpha); stroke.strokeWidth = max(1.2f * density, r * 0.18f)
             val g = r * 0.42f
             c.drawLine(x - g, y, x + g, y, stroke)
@@ -821,6 +1039,133 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
             stroke.color = withAlpha(Col.TEXT, 0.7f); stroke.strokeWidth = 1.5f * density
             c.drawCircle(x, y, r + 5 * density, stroke)
         }
+    }
+
+    // ---------- Sparks where contacts form ----------
+    private fun drawSparks(c: Canvas) {
+        val n = eng.n
+        for (k in sparks.indices.reversed()) {
+            val sp = sparks.getOrNull(k) ?: continue
+            val age = ((clock - sp.t) / SPARK_LIFE).toFloat()
+            if (age !in 0f..1f || sp.i >= n || sp.j >= n) continue
+            projectPoint((snapX[sp.i] + snapX[sp.j]) / 2, (snapY[sp.i] + snapY[sp.j]) / 2, (snapZ[sp.i] + snapZ[sp.j]) / 2)
+            val x = tpx; val y = tpy; val life = 1 - age
+            fill.color = withAlpha(0xFFFFE2A8.toInt(), 0.16f * life); c.drawCircle(x, y, dp(4f + 14f * age), fill)
+            stroke.strokeCap = Paint.Cap.ROUND; stroke.strokeWidth = dp(1.3f)
+            stroke.color = withAlpha(0xFFFFF1D0.toInt(), 0.9f * life)
+            val len = dp(3f + 10f * age); val rot = sp.i * 0.7 + age * 1.5
+            for (m in 0 until 4) {
+                val a = rot + m * PI / 2; val ca = cos(a).toFloat(); val sa = sin(a).toFloat()
+                c.drawLine(x + ca * len * 0.35f, y + sa * len * 0.35f, x + ca * len, y + sa * len, stroke)
+            }
+            fill.color = withAlpha(0xFFFFFF, life); c.drawCircle(x, y, dp(0.6f) + dp(1.8f) * life, fill)
+        }
+    }
+
+    // ---------- Chaperone cage ----------
+    /**
+     * GroEL: a barrel of two stacked seven-part rings around the origin (y is its axis; the open end is at −y,
+     * the top of the screen), amber while its
+     * hydrophobic lining is grabbing the chain, teal once the GroES lid is on. Called twice: the back half
+     * before the protein, the front half (fainter) over it.
+     */
+    private fun drawCage(c: Canvas, front: Boolean) {
+        val phase = snapCagePhase
+        val r = snapCageR; val hh = snapCageH; val prog = snapCageProgress
+        projectPoint(0.0, 0.0, 0.0); val zc = tpz
+        val col = when (phase) { CAGE_CAPTURE -> Col.HYDRO; CAGE_ENCLOSED -> Col.POLAR; else -> Col.HAZE }
+        val fade = if (phase == CAGE_RELEASE) (1 - 0.5 * prog).toFloat() else 1f
+        val a = (if (front) 0.28f else 0.5f) * fade
+        stroke.strokeCap = Paint.Cap.ROUND
+        fun segment(x0: Double, y0: Double, z0: Double, x1: Double, y1: Double, z1: Double, width: Float, alpha: Float = a) {
+            projectPoint(x0, y0, z0); val ax = tpx; val ay = tpy; val az = tpz
+            projectPoint(x1, y1, z1); val bx = tpx; val by = tpy; val bz = tpz
+            if (((az + bz) / 2 > zc) != front) return
+            stroke.color = withAlpha(fog(col, (az + bz) / 2), alpha); stroke.strokeWidth = width
+            c.drawLine(ax, ay, bx, by, stroke)
+        }
+        val seg = 42
+        fun ring(y: Double, radius: Double, width: Float, alpha: Float = a) {
+            for (k in 0 until seg) {
+                val t0 = 2 * PI * k / seg; val t1 = 2 * PI * (k + 1) / seg
+                segment(radius * cos(t0), y, radius * sin(t0), radius * cos(t1), y, radius * sin(t1), width, alpha)
+            }
+        }
+        // Rims, the equator between the two rings, and the domain boundaries inside each ring
+        ring(-hh, r, dp(2.2f)); ring(hh, r, dp(2.2f)); ring(0.0, r, dp(1.6f))
+        ring(-0.5 * hh, r, dp(0.9f), a * 0.6f); ring(0.5 * hh, r, dp(0.9f), a * 0.6f)
+        // Seven subunits per ring
+        for (k in 0 until 7) {
+            val t = 2 * PI * k / 7 + PI / 14
+            val x = r * cos(t); val z = r * sin(t)
+            segment(x, -hh, z, x, hh, z, dp(1.4f))
+        }
+        // The GroES lid: drops on when the cage closes, lifts away on release
+        val lidOffset = when (phase) {
+            CAGE_ENCLOSED -> if (prog < 0.08) 14 * (1 - prog / 0.08) else 0.0
+            CAGE_RELEASE -> 4 + 30 * prog
+            else -> Double.NaN
+        }
+        if (!lidOffset.isNaN()) {
+            val base = -(hh + 1.5 + lidOffset); val dome = -0.42 * r
+            val la = a * (if (phase == CAGE_RELEASE) (1 - prog).toFloat() else 1f)
+            ring(base, r * 0.96, dp(2f), la)
+            for (k in 0 until 7) {
+                val t = 2 * PI * k / 7
+                for (m in 0 until 6) {
+                    val s0 = (PI / 2) * m / 6; val s1 = (PI / 2) * (m + 1) / 6
+                    segment(r * 0.96 * cos(s0) * cos(t), base + dome * sin(s0), r * 0.96 * cos(s0) * sin(t),
+                        r * 0.96 * cos(s1) * cos(t), base + dome * sin(s1), r * 0.96 * cos(s1) * sin(t), dp(1.3f), la)
+                }
+            }
+        }
+        if (front) {
+            projectPoint(0.0, -(hh + (if (lidOffset.isNaN()) 4.0 else 0.42 * r + 8)), 0.0)
+            text.typeface = sans; text.textSize = dp(11f); text.textAlign = Paint.Align.CENTER
+            text.color = withAlpha(col, 0.9f * fade)
+            c.drawText(when (phase) {
+                CAGE_CAPTURE -> "GroEL · hydrophobic lining grabs the chain"
+                CAGE_ENCLOSED -> "GroES lid on · folding alone inside"
+                else -> "Lid off · releasing"
+            }, tpx, tpy - dp(10f), text)
+            text.textAlign = Paint.Align.LEFT
+        }
+    }
+
+    // ---------- Replay bar ----------
+    /** Shown under the replay; each platform can say how its controls work. */
+    var replayHint = "Drag to turn · tap to pause · drag along the bar to scrub"
+    private var barL = 0f; private var barR = 0f; private var barT = 0f; private var barB = 0f
+    private var trackL = 0f; private var trackR = 0f
+    private val icon = Path()
+    private fun drawReplayBar(c: Canvas) {
+        val bw = min(dp(460f), w - dp(32f)); val bh = dp(62f)
+        val x0 = (w - bw) / 2; val y0 = h - bottomInset - (if (wallpaperMode) dp(110f) else dp(20f)) - bh
+        barL = x0; barR = x0 + bw; barT = y0; barB = y0 + bh
+        fill.color = Col.PANEL; c.drawRoundRect(x0, y0, x0 + bw, y0 + bh, dp(10f), dp(10f), fill)
+        stroke.color = Col.LINE; stroke.strokeWidth = density; c.drawRoundRect(x0, y0, x0 + bw, y0 + bh, dp(10f), dp(10f), stroke)
+        // Play or pause symbol
+        val ix = x0 + dp(16f); val iy = y0 + dp(17f)
+        fill.color = Col.HYDRO
+        if (replayPaused) {
+            c.drawRect(ix, iy - dp(5f), ix + dp(3.5f), iy + dp(5f), fill); c.drawRect(ix + dp(6.5f), iy - dp(5f), ix + dp(10f), iy + dp(5f), fill)
+        } else {
+            icon.moveTo(ix, iy - dp(6f)); icon.lineTo(ix + dp(10f), iy); icon.lineTo(ix, iy + dp(6f)); icon.close(); c.drawPath(icon, fill)
+        }
+        text.textAlign = Paint.Align.LEFT; text.typeface = sansBold; text.textSize = dp(13f); text.color = Col.TEXT
+        c.drawText((if (replayPaused) "Paused" else "Replay") + " · ${replaySpeed().roundToInt()}× speed", x0 + dp(34f), y0 + dp(22f), text)
+        text.textAlign = Paint.Align.RIGHT; text.typeface = mono; text.textSize = dp(12f); text.color = Col.HAZE
+        c.drawText("${replayAgo().roundToInt()} s ago", x0 + bw - dp(14f), y0 + dp(22f), text)
+        // Track: the whole recording, with the play position
+        trackL = x0 + dp(16f); trackR = x0 + bw - dp(16f)
+        val ty = y0 + dp(35f)
+        fill.color = Col.LINE; c.drawRoundRect(trackL, ty - dp(2f), trackR, ty + dp(2f), dp(2f), dp(2f), fill)
+        val f = if (recording.size > 1) (replayPos / (recording.size - 1)).toFloat() else 0f
+        val tx = trackL + (trackR - trackL) * f
+        fill.color = Col.POLAR; c.drawRoundRect(trackL, ty - dp(2f), tx, ty + dp(2f), dp(2f), dp(2f), fill)
+        fill.color = Col.TEXT; c.drawCircle(tx, ty, dp(6f), fill)
+        text.textAlign = Paint.Align.LEFT; text.typeface = sans; text.textSize = dp(10.5f); text.color = Col.HAZE
+        c.drawText(ellipsize(replayHint, bw - dp(32f)), x0 + dp(16f), y0 + dp(54f), text)
     }
 
     // ---------- Readout, drawn on the canvas ----------
@@ -882,7 +1227,7 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
             val lx = left + (cell % perLine) * charW; val ly = y + (cell / perLine) * dp(15f) + dp(11f)
             text.color = residueColor(i)
             c.drawText(eng.seq[i].toString(), lx, ly, text)
-            val s = eng.ss[i]
+            val s = snapSS[i]
             if (s != 0) { fill.color = if (s == 1) Col.HELIX else Col.STRAND; c.drawRect(lx, ly + dp(2f), lx + charW, ly + dp(4f), fill) }
             cell++; i++
         }
@@ -959,6 +1304,7 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         all.sortByDescending { it.first }
         return all.take(3)
     }
+    private val tracePath = Path()
     private fun drawSpark(c: Canvas, x: Float, y: Float, sw: Float, sh: Float) {
         if (histLen < 2) return
         var lo = bestE.toFloat(); var hi = -Float.MAX_VALUE
@@ -969,7 +1315,7 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         fun Y(v: Float) = y + pad + (1 - (v - lo) / (hi - lo)) * (sh - 2 * pad)
         dash.color = withAlpha(Col.HAZE, 0.5f)
         c.drawLine(x, Y(bestE.toFloat()), x + sw, Y(bestE.toFloat()), dash)
-        val path = Path()
+        val path = tracePath
         path.moveTo(X(0), Y(hist[0]))
         for (k in 1 until histLen) path.lineTo(X(k), Y(hist[k]))
         stroke.color = Col.HYDRO; stroke.strokeWidth = 1.5f * density
@@ -990,7 +1336,37 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
     private val ripples = ArrayList<DoubleArray>()
     private val tmp = DoubleArray(3)
 
-    fun onPointer(e: PointerEvent): Boolean = lock.withLock { onTouchLocked(e) }
+    fun onPointer(e: PointerEvent): Boolean = lock.withLock { if (replaying) onReplayTouch(e) else onTouchLocked(e) }
+    /** During a replay: drag to turn (even on the wallpaper), drag along the bar to scrub, tap to pause. */
+    private fun onReplayTouch(e: PointerEvent): Boolean {
+        when (e.actionMasked) {
+            PointerEvent.ACTION_DOWN -> {
+                downId = e.getPointerId(0); downX = e.x; downY = e.y; lastX = e.x; lastY = e.y; downTime = e.eventTime; moved = false
+                scrubbing = e.x in barL..barR && e.y in barT..barB
+                if (scrubbing) scrubTo(e.x)
+            }
+            PointerEvent.ACTION_MOVE -> {
+                if (downId < 0) return false
+                if (scrubbing) scrubTo(e.x)
+                else {
+                    if (!moved && hypot(e.x - downX, e.y - downY) > 8 * density) moved = true
+                    if (moved) { yaw += (e.x - lastX) * 0.012 / density; pitch = (pitch + (e.y - lastY) * 0.012 / density).coerceIn(-1.3, 1.3) }
+                }
+                lastX = e.x; lastY = e.y
+            }
+            PointerEvent.ACTION_UP -> {
+                if (downId >= 0 && !scrubbing && !moved && e.eventTime - downTime < 350) replayPaused = !replayPaused
+                scrubbing = false; downId = -1
+            }
+            PointerEvent.ACTION_CANCEL, PointerEvent.ACTION_POINTER_DOWN -> { scrubbing = false; downId = -1 }
+        }
+        return true
+    }
+    private fun scrubTo(x: Float) {
+        val f = ((x - trackL) / max(1f, trackR - trackL)).coerceIn(0f, 1f)
+        replayPos = f * (recording.size - 1.0)
+        showReplayFrame()
+    }
     private fun onTouchLocked(e: PointerEvent): Boolean {
         if (!loaded) return false
         when (e.actionMasked) {

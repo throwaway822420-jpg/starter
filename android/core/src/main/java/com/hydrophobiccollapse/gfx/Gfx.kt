@@ -71,12 +71,18 @@ class Paint(@Suppress("UNUSED_PARAMETER") flags: Int = 0) {
     }
 }
 
+/** A polyline or polygon. Points live in plain float arrays (no boxing), reused across frames. */
 class Path {
-    val xs = ArrayList<Float>(); val ys = ArrayList<Float>()
+    var xs = FloatArray(16); private set
+    var ys = FloatArray(16); private set
+    var size = 0; private set
     var closed = false; private set
-    fun reset() { xs.clear(); ys.clear(); closed = false }
-    fun moveTo(x: Float, y: Float) { reset(); xs.add(x); ys.add(y) }
-    fun lineTo(x: Float, y: Float) { xs.add(x); ys.add(y) }
+    fun reset() { size = 0; closed = false }
+    fun moveTo(x: Float, y: Float) { reset(); lineTo(x, y) }
+    fun lineTo(x: Float, y: Float) {
+        if (size == xs.size) { xs = xs.copyOf(size * 2); ys = ys.copyOf(size * 2) }
+        xs[size] = x; ys[size] = y; size++
+    }
     fun close() { closed = true }
 }
 

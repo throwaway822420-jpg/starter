@@ -64,6 +64,28 @@ class RenderSnapshotTest {
     }
 
     @Test
+    fun chaperoneEffectsAndReplayFrames() {
+        frame("chaperone-ubiquitin.png", Settings(protein = "ubq", viewStyle = 1, chaperone = true, effects = true), 20)
+        frame("effects-beads-bpti.png", Settings(protein = "bpti", effects = true), 20)
+        // A replay: the recording plays back while the engine waits
+        val sim = Simulation(density = 1.5f, wallpaperMode = true)
+        sim.applySettings(Settings(protein = "ubq", viewStyle = 3))
+        sim.resize(1600, 1000)
+        repeat(30 * 30) { sim.update(1.0 / 30) }
+        val t = sim.eng.time
+        assertTrue(sim.startReplay())
+        repeat(30) { sim.update(1.0 / 30) }
+        assertTrue(sim.replaying)
+        assertEquals("the engine waits during a replay", t, sim.eng.time, 1e-9)
+        val b = Bitmap.createBitmap(1600, 1000, Bitmap.Config.ARGB_8888)
+        sim.draw(AndroidCanvas(Canvas(b)))
+        save(b, "replay-ubiquitin.png")
+        repeat(30 * 30) { sim.update(1.0 / 30) }
+        assertTrue("the replay ends by itself", !sim.replaying)
+        assertTrue(sim.exportTrajectoryPdb()!!.lines().count { it.startsWith("MODEL") } > 100)
+    }
+
+    @Test
     fun overlayAndProgressFrames() {
         frame("overlay-ubiquitin.png", Settings(protein = "ubq", viewStyle = 3), 40)
         frame("overlay-insulin.png", Settings(protein = "insulin", viewStyle = 3), 40)

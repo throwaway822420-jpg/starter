@@ -120,6 +120,7 @@ class FoldingWallpaperService : WallpaperService() {
             when (key) {
                 Settings.CMD_HEAT -> sim.heat()
                 Settings.CMD_RESET -> sim.reset()
+                Settings.CMD_REPLAY -> sim.startReplay()
                 else -> sim.applySettings(Settings.load(p))
             }
         }

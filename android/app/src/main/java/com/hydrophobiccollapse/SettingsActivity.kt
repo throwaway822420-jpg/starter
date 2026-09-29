@@ -33,6 +33,7 @@ import kotlin.math.roundToInt
 
 /** The app's own screen: a live preview behind the controls, and a button to set the wallpaper. */
 class SettingsActivity : Activity() {
+    private companion object { const val REQUEST_SAVE_PDB = 41 }
     private lateinit var prefs: SharedPreferences
     private lateinit var preview: FoldingView
     private lateinit var panel: ScrollView
@@ -145,8 +146,11 @@ class SettingsActivity : Activity() {
         col.addView(spinner(listOf("Auto: chains if several, else chemistry", "Chemistry", "Chain (one chain: rainbow N → C)"), s.colorBy.coerceIn(0, 2)) { idx ->
             if (idx != s.colorBy) update(s.copy(colorBy = idx))
         }, margins(top = 4))
+        col.addView(switch("Depth of field and contact sparks", s.effects) { update(s.copy(effects = it)) }, margins(top = 10))
 
         col.addView(section("Experiments"))
+        col.addView(switch("Chaperone cage (GroEL)", s.chaperone) { update(s.copy(chaperone = it)) }, margins(top = 6))
+        col.addView(body("A barrel-shaped helper protein from real cells. Its sticky lining grabs the chain and pulls tangles apart, then a lid closes so it can fold alone inside, then it's released. The cycle repeats.").apply { textSize = 12f }, margins(top = 2))
         col.addView(slider("Pull the ends apart (optical tweezers)", 0f, 300f, 10f, s.pullPN, { if (it == 0f) "off" else "${it.roundToInt()} pN" }) { update(s.copy(pullPN = it)) })
         col.addView(body("Real proteins unfold under roughly 100–300 pN in single-molecule experiments.").apply { textSize = 12f }, margins(top = 2))
         col.addView(label("Folding assist (cheat)"), margins(top = 12))
@@ -161,6 +165,24 @@ class SettingsActivity : Activity() {
         }, margins(top = 4))
         assistNote.text = assistText(s.assist)
         col.addView(assistNote, margins(top = 4))
+
+        col.addView(section("Replay and save"))
+        val speeds = listOf(5, 10, 20)
+        col.addView(label("Replay speed"), margins(top = 6))
+        col.addView(spinner(speeds.map { "$it× faster than it happened" }, speeds.indexOf(s.replaySpeed).coerceAtLeast(1)) { idx ->
+            if (speeds[idx] != s.replaySpeed) update(s.copy(replaySpeed = speeds[idx]))
+        }, margins(top = 4))
+        col.addView(button("Replay the last two minutes", primary = false) {
+            if (!preview.sim.startReplay()) Toast.makeText(this, "Let it run a few seconds first: there's nothing to replay yet.", Toast.LENGTH_SHORT).show()
+            Settings.sendCommand(prefs, Settings.CMD_REPLAY)
+        }, margins(top = 10))
+        col.addView(body("Plays here and on the wallpaper. Drag to turn it while it plays, tap to pause, drag along its bar to scrub.").apply { textSize = 12f }, margins(top = 4))
+        val saveRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        saveRow.addView(button("Save shape (PDB)", primary = false) { savePdb(trajectory = false) },
+            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginEnd = dp(8) })
+        saveRow.addView(button("Save fold movie", primary = false) { savePdb(trajectory = true) }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        col.addView(saveRow, margins(top = 10))
+        col.addView(body("Saves the preview above as a PDB file that PyMOL, ChimeraX or molstar.org/viewer can open.").apply { textSize = 12f }, margins(top = 4))
 
         col.addView(section("Playback"))
         col.addView(slider("Simulation speed", 0.25f, 3f, 0.25f, s.speed, { "${it}×" }) { update(s.copy(speed = it)) })
@@ -191,7 +213,7 @@ class SettingsActivity : Activity() {
         col.addView(row, margins(top = 14))
 
         col.addView(TextView(this).apply { text = colourKey(); textSize = 12f; setLineSpacing(0f, 1.35f) }, margins(top = 16))
-        col.addView(body("Tap a residue to inspect it. Drag a residue to pull it. Drag open space here to turn the molecule; on the home screen, swiping between pages turns it. Tap to stir the water. Double-tap to heat and unfold."), margins(top = 12))
+        col.addView(body("Tap a residue to inspect it. Drag a residue to pull it. Drag open space here to turn the molecule; on the home screen, swiping between pages turns it. Tap to stir the water. Double-tap to heat and unfold. During a replay, dragging turns the molecule on the home screen too."), margins(top = 12))
     }
 
     // ---------- Protein picker, random mode and your own proteins ----------
@@ -489,6 +511,39 @@ class SettingsActivity : Activity() {
             if (k % 2 == 1 && k < items.size - 1) sb.append("\n")
         }
         return sb
+    }
+
+    // ---------- Saving PDB files through the system's file picker ----------
+    private var pendingPdb: String? = null
+    private fun savePdb(trajectory: Boolean) {
+        val text = if (trajectory) preview.sim.exportTrajectoryPdb() else preview.sim.exportPdb()
+        if (text == null) { Toast.makeText(this, "Nothing recorded yet. Let it run for a few seconds first.", Toast.LENGTH_SHORT).show(); return }
+        pendingPdb = text
+        val base = preview.sim.protein.name.replace(Regex("[^A-Za-z0-9]+"), "-").trim('-').lowercase().ifEmpty { "protein" }
+        val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
+            .setType("chemical/x-pdb").putExtra(Intent.EXTRA_TITLE, "$base-${if (trajectory) "fold" else "shape"}.pdb")
+        try {
+            @Suppress("DEPRECATION")
+            startActivityForResult(intent, REQUEST_SAVE_PDB)
+        } catch (e: ActivityNotFoundException) {
+            Toast.makeText(this, "No file picker available.", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        @Suppress("DEPRECATION")
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != REQUEST_SAVE_PDB) return
+        val text = pendingPdb; pendingPdb = null
+        val uri = data?.data
+        if (resultCode != RESULT_OK || uri == null || text == null) return
+        try {
+            contentResolver.openOutputStream(uri)?.use { it.write(text.toByteArray()) }
+            Toast.makeText(this, "Saved.", Toast.LENGTH_SHORT).show()
+        } catch (e: Exception) {
+            Toast.makeText(this, "Couldn't save: ${e.message}", Toast.LENGTH_LONG).show()
+        }
     }
 
     private fun setWallpaper() {

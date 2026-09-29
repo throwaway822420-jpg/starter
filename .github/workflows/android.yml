@@ -76,12 +76,19 @@ jobs:
         shell: pwsh
         run: |
           ./gradlew.bat --no-daemon :desktop:installDist
+          # The app draws its own icon; save it as an .ico for the .exe
+          java -cp "desktop/build/install/HydrophobicCollapse/lib/*" com.hydrophobiccollapse.desktop.MainKt --write-icon build/HydrophobicCollapse.ico
           jpackage --type app-image `
             --input desktop/build/install/HydrophobicCollapse/lib `
             --main-jar desktop.jar `
             --main-class com.hydrophobiccollapse.desktop.MainKt `
             --name HydrophobicCollapse `
+            --icon build/HydrophobicCollapse.ico `
+            --description "Protein folding simulation and live wallpaper" `
             --java-options "-Dsun.java2d.uiScale.enabled=true" `
+            --java-options "-Dsun.awt.noerasebackground=true" `
+            --java-options "-XX:+UseG1GC" `
+            --java-options "-XX:MaxGCPauseMillis=4" `
             --dest dist
           Compress-Archive -Path dist/HydrophobicCollapse -DestinationPath HydrophobicCollapse-Windows.zip
 

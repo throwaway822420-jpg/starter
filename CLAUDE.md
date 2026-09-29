@@ -10,7 +10,7 @@ This is a protein-folding simulation. The user runs it as a live wallpaper on a 
 |---|---|---|
 | Web version (single file) | `index.html` (3D). `classic.html` is the original 2D HP model | Done. It no longer gets new features. |
 | **Android live-wallpaper app** | `android/app` | Main product. It has all the features. |
-| **Windows desktop app** (Swing) | `android/desktop` | New. Built and packaged by CI. It has not yet been run on a real Windows PC. |
+| **Windows desktop app** (Swing) | `android/desktop` | Built and packaged by CI. Tested on the user's Windows 10 PC (1920×1080), including wallpaper mode. |
 | Shared engine and renderer | `android/core` (Kotlin/JVM, no Android dependencies) | Used by both apps |
 
 Distribution: GitHub Actions publishes the prerelease `wallpaper-latest` (https://github.com/throwaway822420-jpg/starter/releases/tag/wallpaper-latest) with:
@@ -33,8 +33,9 @@ tools/extract_native.py         Downloads PDB files and regenerates core/.../Nat
 android/                        Gradle root (Gradle 8.14.3, AGP 8.13.2, Kotlin 2.2.20, JVM 17)
   settings.gradle.kts           include(":core", ":app", ":desktop")
   core/src/main/java/com/hydrophobiccollapse/
-    ProteinEngine.kt   (~1100 lines) The physics: Langevin dynamics, forces, chemistry, Gō model, Q/RMSD
-    Simulation.kt      (~1040 lines) Owns the engine, the physics thread, camera, input and ALL drawing (via gfx shim)
+    ProteinEngine.kt   (~1200 lines) The physics: Langevin dynamics, forces, chemistry, Gō model, Q/RMSD, chaperone cage
+    Simulation.kt      (~1400 lines) Owns the engine, the physics thread, camera, input, replay, sparks and ALL drawing (via gfx shim)
+    Recording.kt       Ring buffer of recent frames (replay + trajectory export) and PdbWriter (Cα-only PDB, multi-MODEL)
     Proteins.kt        Presets, random proteins, custom-protein JSON, Settings data class + KeyValueStore persistence
     StructureIO.kt     Parses PDB/mmCIF and downloads from RCSB / AlphaFold (org.json is compileOnly in core)
     NativeStructures.kt  GENERATED. Do not edit by hand
@@ -50,13 +51,21 @@ android/                        Gradle root (Gradle 8.14.3, AGP 8.13.2, Kotlin 2
     wallpaper-debug.keystore   Fixed signing key so updates install over each other (personal sideload only)
   app/src/test/.../RenderSnapshotTest.kt  Robolectric: renders frames to app/build/snapshots/*.png plus timing checks
   desktop/
-    Java2DCanvas.kt   Graphics2D implementation of the gfx Canvas (fonts: Segoe UI or Cascadia Mono/Consolas, with fallbacks)
-    Main.kt           Swing + FlatLaf dark. SimPanel, MainWindow (control side panel matching the Android settings),
-                      ProteinEditor dialog (custom sequence, PDB/AlphaFold fetch), FileStore → %APPDATA%\HydrophobicCollapse\settings.properties
+    Java2DCanvas.kt   Graphics2D implementation of the gfx Canvas. Caches strokes/colours/fonts, paints the background gradient
+                      once into an image, fills rects without AA (fonts: Segoe UI or Cascadia Mono/Consolas, with fallbacks)
+    Surface.kt        SimSurface: heavyweight AWT Canvas + BufferStrategy, frame painted into a BufferedImage then blitted.
+                      Animator: the "hc-render" thread that calls sim.update + render, paced to the monitor refresh (≤120 Hz,
+                      30 fps when lowFrameRate). -Dhc.debug prints fps and per-frame simulation/painting/present times.
+    WinDesktop.kt     JNA Win32: attach a window behind the desktop icons (WorkerW; Win11 24H2 layout handled but untested),
+                      restore the old wallpaper, timeBeginPeriod(1), "desktop hidden" check, HKCU Run key for start-up
+    IconFile.kt       Writes the app icon as .ico (CI: MainKt --write-icon <file>, then jpackage --icon)
+    Main.kt           Swing + FlatLaf dark. MainWindow (control side panel matching the Android settings, Scrollable so it
+                      tracks the viewport width; notes are wrapping JTextAreas), WallpaperWindow, tray icon, PDB save dialogs,
+                      a KeyEventDispatcher for shortcuts, ProteinEditor dialog, FileStore → %APPDATA%\HydrophobicCollapse\settings.properties
     src/test/.../RenderTest.kt  Headless render → desktop/build/render/desktop.png (checks the frame isn't blank)
 ```
 
-About 8,000 lines in total (Kotlin about 5,000, HTML about 2,200).
+About 9,500 lines in total (Kotlin about 6,700, HTML about 2,200).
 
 ## Simulation model (core)
 
@@ -93,6 +102,17 @@ The model is a coarse-grained Cα chain. Units are Å, kcal/mol, K and ps-ish ti
   - cartoon: Catmull–Rom ribbons for helices, arrows for strands
   - backbone
   - beads + cartoon overlay
+- **Chaperone cage** (`Settings.chaperone`, engine `chaperone`): GroEL-like cylinder around the origin along y, open end at −y
+  (drawn at the top of the screen). Phases CAGE_CAPTURE 3 s (hydrophobic lining well + pull of the chain into the cage),
+  CAGE_ENCLOSED 8 s (lid on, polar walls, cavity ×1.1), CAGE_RELEASE 2.5 s (push toward −y). The clock is `advanceClock`,
+  i.e. wall time. Camera centres on the cage while it is on.
+- **Time-lapse replay:** `Recording` keeps a frame every 0.25 s (2 min, less for huge proteins). During a replay the engine
+  and Extreme thread wait; `showReplayFrame` interpolates into the snapshot arrays; drag rotates (also in wallpaperMode),
+  tap pauses, the bar scrubs. Speed = min(setting, recording/4 s). Android: `Settings.CMD_REPLAY` through prefs.
+- **Drawing reads snapshots:** `snapSS`, `snapDisulfides`, `snapCage*` (not `eng.ss` etc.) so replays and Extreme mode draw
+  consistent data. Contacts and salt bridges are live-only (hidden in replays).
+- **Effects** (`Settings.effects`, ≤1200 residues): fake depth of field (halos and fading behind the front) and sparks on
+  newly formed long-range contacts (with a 4 s per-pair cooldown).
 - **Proteins:**
   - many presets (chignolin, trp-cage, GB1, villin, BPTI, insulin, ubiquitin, lysozyme, myoglobin, GFP, GCN4, hemoglobin, sickle Hb, …)
   - random mode (a new protein each time the screen turns on)
@@ -123,7 +143,10 @@ To look at rendering after a change, run the snapshot or render tests and open t
 ## Conventions and gotchas
 
 - **All drawing lives in `Simulation.kt` and goes through the `gfx` shim.** Never import `android.*` in `core`. If you need a new drawing primitive, add it to `gfx/Gfx.kt`, `AndroidCanvas` and `Java2DCanvas` together.
-- **Settings:** add a field to the `Settings` data class, to `Settings.save/load(KeyValueStore)` in `Proteins.kt`, to the Android UI (`SettingsActivity.kt`) and to the desktop control panel (`desktop/Main.kt`). Keep the two UIs matching.
+- **Settings:** add a field to the `Settings` data class, to `Settings.save/load(KeyValueStore)` in `Proteins.kt`, to the Android UI (`SettingsActivity.kt`) and to the desktop control panel (`desktop/Main.kt`). Keep the two UIs matching. Windows-only preferences (pause when covered, readout on the wallpaper) live in the FileStore under `desktop.*` keys, not in `Settings`.
+- **Desktop threading:** `sim.update` and `sim.draw` both run on the Animator thread; Swing callbacks (EDT) only call locked
+  Simulation methods. Don't call `sim.draw` from the EDT.
+- **Heavyweight canvas:** popups are forced heavyweight (`JPopupMenu.setDefaultLightWeightPopupEnabled(false)`) so they show over it.
 - Input goes through `sim.onPointer(PointerEvent)`, using Android action codes. The desktop maps mouse events to it.
 - Inside Swing `.apply {}` blocks, `name` resolves to `Component.name`. That is why the editor field is called `nameField`.
 - Tests are seeded. Do not add unseeded randomness to tests, because it made them flaky before.
@@ -132,8 +155,14 @@ To look at rendering after a change, run the snapshot or render tests and open t
 - `NativeStructures.kt` is generated: regenerate it with `python3 tools/extract_native.py` from the repo root.
 - Commit messages: a descriptive summary plus body. Keep model names out of repo files.
 
+## Local build on the user's Windows PC
+
+No JDK or Android SDK is installed system-wide. A session can download a portable Temurin 17 and the Android command-line
+tools into its scratchpad and point `JAVA_HOME` and `local.properties` (`sdk.dir`, git-ignored) at them.
+
 ## Ideas not yet done
 
-- Real-Windows smoke test: the user should run the .exe and report back. Possible follow-ups are an `.ico` app icon for jpackage (`--icon`), an MSI installer (`--type msi` needs WiX), and HiDPI checks.
+- Windows follow-ups: an MSI installer (`--type msi` needs WiX), wallpaper on every monitor (now primary only), testing
+  wallpaper mode on Windows 11 24H2, pinch-zoom on Android.
 - The web version (`index.html`) lacks the newer features (cartoon, assist, tweezers, …).
 - More ideas the user might like: protein–ligand binding, a membrane slab, chaperone cage, sharing or exporting a trajectory as a PDB file.

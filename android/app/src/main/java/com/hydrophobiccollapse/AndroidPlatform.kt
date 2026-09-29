@@ -77,7 +77,8 @@ class AndroidCanvas(val c: android.graphics.Canvas) : Canvas {
         c.drawRoundRect(left, top, right, bottom, rx, ry, apply(paint))
     override fun drawPath(path: Path, paint: Paint) {
         this.path.reset()
-        for (k in path.xs.indices) if (k == 0) this.path.moveTo(path.xs[0], path.ys[0]) else this.path.lineTo(path.xs[k], path.ys[k])
+        val xs = path.xs; val ys = path.ys
+        for (k in 0 until path.size) if (k == 0) this.path.moveTo(xs[0], ys[0]) else this.path.lineTo(xs[k], ys[k])
         if (path.closed) this.path.close()
         c.drawPath(this.path, apply(paint))
     }

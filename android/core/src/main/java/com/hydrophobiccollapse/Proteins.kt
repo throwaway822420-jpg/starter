@@ -284,6 +284,12 @@ data class Settings(
     val colorBy: Int = 0,
     /** 0 beads, 1 cartoon, 2 backbone trace, 3 beads with the cartoon on top */
     val viewStyle: Int = 0,
+    /** Depth of field (far residues soften) and sparks where new contacts form */
+    val effects: Boolean = false,
+    /** A GroEL-style chaperone cage that captures, encloses and releases the chain in cycles */
+    val chaperone: Boolean = false,
+    /** How many times faster than real time a replay runs: 5, 10 or 20 */
+    val replaySpeed: Int = 10,
 ) {
     /** Writes every setting to a platform's key–value storage. */
     fun save(p: KeyValueStore) {
@@ -294,6 +300,7 @@ data class Settings(
         p.putInt("randomLength", randomLength); p.putInt("randomStyle", randomStyle); p.putBoolean("randomOnWake", randomOnWake)
         p.putString("customJson", customJson); p.putFloat("nativeBias", nativeBias); p.putInt("crowding", crowding)
         p.putInt("colorBy", colorBy); p.putInt("viewStyle", viewStyle)
+        p.putBoolean("effects", effects); p.putBoolean("chaperone", chaperone); p.putInt("replaySpeed", replaySpeed)
         p.commit()
     }
 
@@ -301,6 +308,7 @@ data class Settings(
         const val PREFS = "settings"
         const val CMD_HEAT = "cmd_heat"
         const val CMD_RESET = "cmd_reset"
+        const val CMD_REPLAY = "cmd_replay"
 
         fun load(p: KeyValueStore, d: Settings = Settings()): Settings = Settings(
             protein = p.getString("protein", d.protein),
@@ -325,6 +333,9 @@ data class Settings(
             crowding = p.getInt("crowding", d.crowding),
             colorBy = p.getInt("colorBy", d.colorBy),
             viewStyle = p.getInt("viewStyle", d.viewStyle),
+            effects = p.getBoolean("effects", d.effects),
+            chaperone = p.getBoolean("chaperone", d.chaperone),
+            replaySpeed = p.getInt("replaySpeed", d.replaySpeed),
         )
     }
 }

@@ -81,6 +81,16 @@ private val ASSIST_SQUEEZE_K = doubleArrayOf(0.0, 0.004, 0.015, 0.05) // toward 
 private val ASSIST_STICKY = doubleArrayOf(0.0, 0.25, 0.6, 1.0)      // extra contact stickiness, when no structure is known
 private const val ASSIST_EVERY = 20        // steps between re-superposing the target
 private const val DISSOCIATE = 1.4       // complexes start with each chain this much further from the centre than in the real structure
+// Chaperone cage (GroEL/GroES). The cage is a cylinder around the origin along y, open end at −y (which the
+// renderer draws at the top of the screen). While open, its lining is hydrophobic
+// and grabs exposed hydrophobic residues, stretching a misfolded chain; with the lid on, the lining turns polar
+// and the chain folds alone in the enlarged cavity (the "Anfinsen cage"); then the lid comes off and it is ejected.
+private const val EPS_CAGE = 1.1           // lining attraction for the most hydrophobic residue, kcal/mol
+private const val W_CAGE = 2.5             // width of the lining well, Å
+private const val K_CAGE_WALL = 5.0        // cage wall stiffness, kcal/(mol·Å²)
+private const val K_CAGE_BIND = 0.02       // pull of the whole chain into the open cage while capturing
+private const val CAGE_EJECT = 0.15        // upward push per residue as the lid comes off, kcal/(mol·Å)
+private val CAGE_SECONDS = doubleArrayOf(0.0, 3.0, 8.0, 2.5)   // off, capture, enclosed, release
 
 const val AMINO_ACIDS = "ARNDCQEGHILKMFPSTWYV"
 private const val MAX_SIG = 0.9 * 2 * 3.5
@@ -112,6 +122,12 @@ private fun wrap(a0: Double): Double {
     while (a < -PI) a += 2 * PI
     return a
 }
+
+// Chaperone cage phases
+const val CAGE_OFF = 0
+const val CAGE_CAPTURE = 1
+const val CAGE_ENCLOSED = 2
+const val CAGE_RELEASE = 3
 
 class Site(val res: Int, val pKa: Double, val acid: Boolean, var prot: Boolean, var active: Boolean, val isCys: Boolean)
 class ChemEvent(val t: Double, val text: String)
@@ -221,6 +237,37 @@ class ProteinEngine {
     private var tgX = DoubleArray(0); private var tgY = DoubleArray(0); private var tgZ = DoubleArray(0)
     private var targetsValid = false
 
+    /** The chaperone cage, cycling capture → enclosed → release while switched on. */
+    var chaperone = false
+        set(v) {
+            if (v == field) return
+            field = v; cageT = 0.0; cageCycles = 0
+            cagePhase = if (v) CAGE_CAPTURE else CAGE_OFF
+            if (v && n > 0) log("GroEL chaperone: capturing the chain")
+        }
+    var cagePhase = CAGE_OFF; private set
+    /** Seconds into the current cage phase. */
+    var cageT = 0.0; private set
+    /** Completed capture–fold–release cycles. */
+    var cageCycles = 0; private set
+    /** Cavity radius and half-height, Å. The cavity grows by a tenth when the lid closes, as GroEL's does. */
+    fun cageRadiusFor(phase: Int) = max(12.0, 1.35 * 3.18 * Math.cbrt(n.toDouble()) + 4) * (if (phase == CAGE_ENCLOSED) 1.1 else 1.0)
+    val cageRadius get() = cageRadiusFor(cagePhase)
+    val cageHalfHeight get() = 1.15 * cageRadius
+    /** How far through the current phase, 0…1. */
+    val cageProgress get() = if (cagePhase == CAGE_OFF) 0.0 else (cageT / CAGE_SECONDS[cagePhase]).coerceIn(0.0, 1.0)
+    private fun updateCage(dt: Double) {
+        if (cagePhase == CAGE_OFF) return
+        cageT += dt
+        if (cageT < CAGE_SECONDS[cagePhase]) return
+        cageT = 0.0
+        cagePhase = when (cagePhase) {
+            CAGE_CAPTURE -> { log("GroES lid on: folding alone inside the cage"); CAGE_ENCLOSED }
+            CAGE_ENCLOSED -> { log("Lid off: the chain is released"); CAGE_RELEASE }
+            else -> { cageCycles++; log("GroEL captures the chain again (cycle ${cageCycles + 1})"); CAGE_CAPTURE }
+        }
+    }
+
     // Known structure (PDB or AlphaFold) and how strongly to steer toward it, 0…1
     var nativeBias = 1.0
     var structureSource: String? = null; private set
@@ -248,6 +295,8 @@ class ProteinEngine {
     }
 
     fun radius(i: Int) = rad[i]
+    /** Three-letter residue name in capitals, as PDB files write it ("ALA"). */
+    fun residueName3(i: Int) = THREE[type[i]].uppercase()
     fun debye() = 3.04 / sqrt(maxOf(saltMM, 1.0) / 1000)
     fun sameChain(i: Int, j: Int) = chainOf[i] == chainOf[j]
     fun chainLetter(c: Int): Char = if (c < 26) 'A' + c else 'a' + (c - 26) % 26
@@ -722,6 +771,8 @@ class ProteinEngine {
             fx[a] -= f * dx; fy[a] -= f * dy; fz[a] -= f * dz
         }
 
+        if (cagePhase != CAGE_OFF) eBox += cageForces(cx, cy, cz, measure)
+
         // A finger pulling one residue
         val g = grab
         if (g in 0 until n) {
@@ -736,6 +787,52 @@ class ProteinEngine {
             energy = eLocal + eContact + eElec
         }
         return total
+    }
+
+    /** Chaperone cage forces (a cylinder along y around the origin); returns its energy when measuring. */
+    private fun cageForces(cx: Double, cy: Double, cz: Double, measure: Boolean): Double {
+        val phase = cagePhase
+        var e = 0.0
+        if (phase == CAGE_RELEASE) {
+            // Lid off: the chain is pushed out of the open end
+            for (i in 0 until n) fy[i] -= CAGE_EJECT
+            return 0.0
+        }
+        val r = cageRadius; val hh = cageHalfHeight
+        val lidOn = phase == CAGE_ENCLOSED
+        val lining = r - 2.0
+        for (i in 0 until n) {
+            val xi = x[i]; val yi = y[i]; val zi = z[i]
+            val rho = sqrt(xi * xi + zi * zi).coerceAtLeast(1e-6)
+            // Side wall
+            if (rho > r) {
+                val d = rho - r; val f = -min(K_CAGE_WALL * d, FMAX) / rho
+                fx[i] += f * xi; fz[i] += f * zi
+                if (measure) e += 0.5 * K_CAGE_WALL * d * d
+            }
+            // Floor (the second GroEL ring), and the GroES lid over the open end while it is on
+            if (yi > hh) { val d = yi - hh; fy[i] -= min(K_CAGE_WALL * d, FMAX); if (measure) e += 0.5 * K_CAGE_WALL * d * d }
+            if (lidOn && yi < -hh) { val d = -hh - yi; fy[i] += min(K_CAGE_WALL * d, FMAX); if (measure) e += 0.5 * K_CAGE_WALL * d * d }
+            // Open cage: a hydrophobic lining binds exposed hydrophobic residues
+            if (!lidOn) {
+                val h = (HYD[type[i]] + 4.5) / 9
+                if (h > 0.55 && yi > -hh - 4 && yi < hh) {
+                    val d = rho - lining
+                    if (abs(d) < 4 * W_CAGE) {
+                        val g = EPS_CAGE * h * exp(-d * d / (2 * W_CAGE * W_CAGE))
+                        val f = -(g * d / (W_CAGE * W_CAGE)) / rho
+                        fx[i] += f * xi; fz[i] += f * zi
+                        if (measure) e -= g
+                    }
+                }
+            }
+        }
+        // While capturing, draw the whole chain into the cage
+        if (phase == CAGE_CAPTURE) {
+            for (i in 0 until n) { fx[i] -= K_CAGE_BIND * cx; fy[i] -= K_CAGE_BIND * cy; fz[i] -= K_CAGE_BIND * cz }
+            if (measure) e += 0.5 * K_CAGE_BIND * n * (cx * cx + cy * cy + cz * cz)
+        }
+        return e
     }
 
     /** Pair contact forces for shortPairs[p0, p1) into the given arrays; returns the contact energy when measuring. */
@@ -900,7 +997,7 @@ class ProteinEngine {
             if (assist > 0 && stepCount % ASSIST_EVERY == 0L) targetsValid = false
         }
     }
-    fun advanceClock(dt: Double) { time += dt }
+    fun advanceClock(dt: Double) { time += dt; updateCage(dt) }
 
     /** Cheap per-frame update of the centre of mass (measure() does this too). */
     fun updateCenter() {

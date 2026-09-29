@@ -36,14 +36,28 @@ Keyboard shortcuts:
 | Key | Action |
 |---|---|
 | F11 | Full screen |
-| Esc | Leave full screen |
+| Esc | Stop a replay, or leave full screen |
 | Tab | Hide or show the panel |
-| Space | Heat to unfold |
+| Space | Heat to unfold (pause, during a replay) |
 | R | Start over |
+| P | Replay the last two minutes |
+| ← → ↑ ↓ | Turn the molecule (← → jump through a replay) |
+| + − or mouse wheel | Zoom |
 
-The mouse works like touch: drag a residue to pull it, click to stir, double-click to heat. Settings are saved in `%APPDATA%\HydrophobicCollapse`.
+The mouse works like touch: drag a residue to pull it, drag open space to turn the molecule, click to stir, double-click to heat. Settings are saved in `%APPDATA%\HydrophobicCollapse`.
+
+**Live wallpaper on Windows:** click **Set as wallpaper**. The simulation moves behind your desktop icons on the main screen. Minimize or close the window and the wallpaper keeps running; the tray icon by the clock brings the controls back or stops it. It pauses by itself while a window is maximized or full screen (a game, a video), so it costs nothing when you can't see it. Moving the mouse turns the molecule a little. Tick **Start as wallpaper when Windows starts** to have it come back after a restart. Stopping it puts your normal wallpaper back.
+
+**Smoothness:** the simulation and drawing run on their own thread at your screen's refresh rate (up to 120 Hz), with 1 ms Windows timers for even frame timing, so the controls never stall the animation.
 
 **Building it yourself:** from `android/`, run `./gradlew :desktop:run` (needs only JDK 17+).
+
+## Replay, saving and extras
+
+- **Time-lapse replay** (both apps): the last two minutes are recorded, and **Replay** plays them back 5, 10 or 20 times faster. The molecule stays live to the camera: drag to turn it (even on the Android home screen), scroll to zoom on Windows, tap to pause, drag along the bar to scrub. When the replay ends the simulation carries on from where it was.
+- **Save as PDB:** **Save shape** writes the current structure; **Save fold movie** writes the recording as a multi-model PDB trajectory. Both are Cα-only files with chains, secondary structure and disulfides, readable by PyMOL, ChimeraX, VMD or [Mol*](https://molstar.org/viewer/).
+- **Chaperone cage (GroEL):** a barrel-shaped helper protein, drawn as two seven-part rings. While open, its lining is hydrophobic and grabs the chain's exposed hydrophobic residues, pulling tangles apart. Then the GroES lid closes, the lining turns polar and the chain folds alone in the enlarged cavity. Then the lid lifts and the chain is pushed out. The cycle repeats every 13.5 seconds.
+- **Depth of field and sparks** (View settings): the back of the molecule softens out of focus, the front glows, and a small spark marks every new contact as the chain folds.
 
 ## Web version
 
