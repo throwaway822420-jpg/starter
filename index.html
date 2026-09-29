@@ -1,0 +1,901 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Hydrophobic Collapse</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;600&family=Martian+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: full-bleed simulation canvas; a quiet readout docked bottom-left, settings behind a corner button.
+   Single dark world on purpose: it is a wallpaper, and the beads read best on a dark field. */
+:root {
+  --ink: #0a0f1d;          /* solvent field */
+  --ink-edge: #04060c;     /* vignette edge */
+  --panel: rgba(13, 19, 36, 0.74);
+  --line: rgba(160, 176, 214, 0.16);
+  --text: #e4e8f3;
+  --haze: #8a94b0;         /* secondary text, a blue-biased grey */
+  --hydro: #f0a44b;        /* H residues: hydrophobic, buried in the core */
+  --hydro-dim: #7d6247;    /* H residues still exposed to solvent */
+  --polar: #74cfc0;        /* P residues: polar, stay on the surface */
+  --bond: rgba(186, 198, 228, 0.40);
+
+  --f-ui: "Hanken Grotesk", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --f-data: "Martian Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  color-scheme: dark;
+}
+[hidden] { display: none !important; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  overflow: hidden;
+  background: radial-gradient(120% 90% at 50% 45%, var(--ink) 40%, var(--ink-edge) 100%);
+  background-color: var(--ink);
+  color: var(--text);
+  font-family: var(--f-ui);
+  font-size: 14px;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+#sim {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  touch-action: none;
+}
+
+/* Readout */
+.hud {
+  position: fixed;
+  left: max(16px, env(safe-area-inset-left, 0px));
+  bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  width: min(320px, calc(100vw - 32px));
+  box-sizing: border-box;
+  padding: 14px 16px;
+  display: grid;
+  gap: 12px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  pointer-events: none;
+}
+.hud-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+.phase {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  font-size: 15px;
+}
+.phase-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--polar);
+  transition: background 0.4s;
+}
+.phase[data-hot="true"] .phase-dot { background: var(--hydro); }
+.temp, .seq-name, dd, .cap {
+  font-family: var(--f-data);
+  font-variant-numeric: tabular-nums;
+}
+.temp { font-size: 12px; color: var(--haze); }
+.seq-block { display: grid; gap: 6px; }
+.seq-name { font-size: 10px; color: var(--haze); letter-spacing: 0.02em; }
+.seq {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+}
+.seq i {
+  width: 6px;
+  height: 6px;
+  border-radius: 1px;
+  box-sizing: border-box;
+}
+.seq i.h { background: var(--hydro-dim); }
+.seq i.h.on { background: var(--hydro); }
+.seq i.p { border: 1px solid var(--polar); opacity: 0.7; }
+.stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+.stats div { min-width: 0; }
+dt {
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--haze);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+dd { margin: 3px 0 0; font-size: 14px; }
+dd small { font-size: 10px; color: var(--haze); }
+.plots {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 64px;
+  gap: 12px;
+  align-items: end;
+}
+.plot { display: grid; gap: 4px; min-width: 0; }
+#spark { width: 100%; height: 40px; display: block; }
+#cmap {
+  width: 64px;
+  height: 64px;
+  display: block;
+  image-rendering: pixelated;
+  border-radius: 2px;
+}
+.cap { font-size: 9px; color: var(--haze); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* Settings */
+.gear {
+  position: fixed;
+  top: calc(16px + env(safe-area-inset-top, 0px));
+  right: max(16px, env(safe-area-inset-right, 0px));
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--haze);
+  cursor: pointer;
+}
+.gear:hover { color: var(--text); }
+.gear:focus-visible, .sheet :focus-visible {
+  outline: 2px solid var(--polar);
+  outline-offset: 2px;
+}
+.sheet {
+  position: fixed;
+  top: calc(66px + env(safe-area-inset-top, 0px));
+  right: max(16px, env(safe-area-inset-right, 0px));
+  width: min(300px, calc(100vw - 32px));
+  box-sizing: border-box;
+  padding: 16px;
+  display: grid;
+  gap: 14px;
+  background: rgba(13, 19, 36, 0.94);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  font-size: 13px;
+}
+.sheet h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.field { display: grid; gap: 6px; }
+.field label, .check span { color: var(--haze); font-size: 12px; }
+.field-row { display: flex; align-items: center; gap: 10px; }
+.field-row input { flex: 1; min-width: 0; accent-color: var(--hydro); }
+output { font-family: var(--f-data); font-size: 12px; min-width: 3.5em; text-align: right; }
+select {
+  font: inherit;
+  color: var(--text);
+  background: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 7px 8px;
+}
+.check { display: flex; align-items: center; gap: 8px; }
+.check input { accent-color: var(--hydro); width: 16px; height: 16px; margin: 0; }
+.check span { color: var(--text); font-size: 13px; }
+.btn {
+  font: inherit;
+  font-weight: 600;
+  padding: 9px 12px;
+  border-radius: 6px;
+  border: 0;
+  cursor: pointer;
+  background: var(--hydro);
+  color: var(--ink);
+}
+.btn-ghost {
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--haze);
+  cursor: pointer;
+}
+.help { margin: 0; color: var(--haze); font-size: 12px; line-height: 1.5; }
+.help b { color: var(--text); font-weight: 600; }
+
+/* #clean: wallpaper mode, nothing but the molecule. Long-press still opens settings. */
+body.clean .gear { opacity: 0; pointer-events: none; }
+body.no-hud .hud { display: none; }
+</style>
+</head>
+<body>
+<canvas id="sim" aria-label="Protein folding simulation. Drag a bead to pull the chain, double-tap to unfold it."></canvas>
+
+<section class="hud" id="hud" aria-live="off">
+  <div class="hud-head">
+    <div class="phase" id="phase" data-hot="false"><span class="phase-dot"></span><span id="phaseText">Folding</span></div>
+    <div class="temp" id="temp">T* 0.40</div>
+  </div>
+  <div class="seq-block">
+    <div class="seq-name" id="seqName">Benchmark 48-mer</div>
+    <div class="seq" id="seqStrip"></div>
+  </div>
+  <dl class="stats">
+    <div><dt>Energy</dt><dd id="energy">0.0 <small>ε</small></dd></div>
+    <div><dt>H–H contacts</dt><dd id="contacts">0</dd></div>
+    <div><dt>Rg</dt><dd id="rg">0.0 <small>σ</small></dd></div>
+  </dl>
+  <div class="plots">
+    <div class="plot">
+      <canvas id="spark"></canvas>
+      <div class="cap" id="sparkCap">Energy, last 60 s</div>
+    </div>
+    <div class="plot">
+      <canvas id="cmap" width="48" height="48"></canvas>
+      <div class="cap">Contact map</div>
+    </div>
+  </div>
+</section>
+
+<button class="gear" id="gear" type="button" aria-label="Settings" aria-expanded="false" aria-controls="sheet">
+  <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
+    <path d="M2 4.5h14M2 9h14M2 13.5h14"/>
+    <circle cx="6" cy="4.5" r="1.8" fill="var(--ink)"/>
+    <circle cx="12" cy="9" r="1.8" fill="var(--ink)"/>
+    <circle cx="7.5" cy="13.5" r="1.8" fill="var(--ink)"/>
+  </svg>
+</button>
+
+<form class="sheet" id="sheet" hidden>
+  <h2>Simulation <button class="btn-ghost" id="closeSheet" type="button">Done</button></h2>
+  <div class="field">
+    <label for="seqSel">Sequence</label>
+    <select id="seqSel"></select>
+  </div>
+  <div class="field">
+    <label for="speed">Simulation speed</label>
+    <div class="field-row"><input id="speed" type="range" min="0.25" max="3" step="0.25"><output id="speedOut" for="speed">1×</output></div>
+  </div>
+  <div class="field">
+    <label for="cycle">Unfold and refold every</label>
+    <select id="cycle">
+      <option value="30">30 seconds</option>
+      <option value="60">1 minute</option>
+      <option value="120">2 minutes</option>
+      <option value="300">5 minutes</option>
+      <option value="0">Never</option>
+    </select>
+  </div>
+  <label class="check"><input id="showHud" type="checkbox"><span>Show readout</span></label>
+  <label class="check"><input id="saver" type="checkbox"><span>Battery saver (30 fps)</span></label>
+  <button class="btn" id="unfoldBtn" type="button">Unfold now</button>
+  <p class="help"><b>Drag</b> a bead to pull the chain. <b>Tap</b> open space to stir the solvent. <b>Double-tap</b> to unfold. <b>Long-press</b> anywhere to open this panel.</p>
+</form>
+
+<script>
+(() => {
+'use strict';
+
+// ---------- Sequences ----------
+// 2D HP-model benchmark sequences (Unger & Moult set), H = hydrophobic, P = polar.
+const SEQUENCES = [
+  { id: 'b20', name: 'Benchmark 20-mer', seq: 'HPHPPHHPHPPHPHHPPHPH' },
+  { id: 'b24', name: 'Benchmark 24-mer', seq: 'HHPPHPPHPPHPPHPPHPPHPPHH' },
+  { id: 'b36', name: 'Benchmark 36-mer', seq: 'PPPHHPPHHPPPPPHHHHHHHPPHHPPPPHHPPHPP' },
+  { id: 'b48', name: 'Benchmark 48-mer', seq: 'PPHPPHHPPHHPPPPPHHHHHHHHHHPPPPPPHHPPHHPPHPPHHHHH' },
+  { id: 'b50', name: 'Benchmark 50-mer', seq: 'HHPHPHPHPHHHHPHPPPHPPPHPPPPHPPPHPPPHPHHHHPHPHPHPHH' },
+  { id: 'b64', name: 'Benchmark 64-mer', seq: 'HHHHHHHHHHHHPHPHPPHHPPHHPPHPPHHPPHHPPHPPHHPPHHPPHPHPHHHHHHHHHHHH' },
+  { id: 'rnd', name: 'Random 40-mer', seq: null },
+];
+function randomSeq(n) {
+  let s = '';
+  for (let i = 0; i < n; i++) s += Math.random() < 0.45 ? 'H' : 'P';
+  return s;
+}
+
+// ---------- Settings ----------
+const reduceMotion = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
+const DEFAULTS = { seq: 'b48', speed: reduceMotion ? 0.5 : 1, cycle: 60, hud: true, saver: false };
+const STORE_KEY = 'hydrophobic-collapse-settings';
+let settings = { ...DEFAULTS };
+try {
+  const saved = JSON.parse(localStorage.getItem(STORE_KEY) || 'null');
+  if (saved && typeof saved === 'object') settings = { ...DEFAULTS, ...saved };
+} catch (e) { /* storage unavailable: use defaults */ }
+function saveSettings() {
+  try { localStorage.setItem(STORE_KEY, JSON.stringify(settings)); } catch (e) { /* ignore */ }
+}
+const clean = location.hash === '#clean';
+if (clean) document.body.classList.add('clean');
+
+// ---------- Model constants (reduced Lennard-Jones units) ----------
+const DT = 0.004;          // integration step, τ
+const GAMMA = 0.5;         // solvent friction
+const KB = 400;            // bond spring
+const KANG = 0.5;          // backbone bending stiffness
+const EPS = 1.0;           // H–H well depth ε
+const RC2 = 2.5 * 2.5;     // H–H cutoff²
+const WCA2 = Math.pow(2, 1 / 3); // purely repulsive cutoff² for pairs involving P
+const CONTACT2 = 1.5 * 1.5;
+const FMAX = 400;
+const LJ_SHIFT = 4 * (Math.pow(RC2, -6) - Math.pow(RC2, -3));
+const T_FOLD = 0.50;
+const T_HOT = 2.2;
+
+// ---------- State ----------
+let seqDef, seq, N, isH;
+let x, y, vx, vy, fx, fy, nContacts;
+let contactNow, contactAvg, pairs = [];
+let energy = 0, contactCount = 0, rg = 0, bestE = 0;
+let hist = [];
+let T = T_HOT, phase = 'hot', phaseT = 0;
+let grabbed = -1, target = { x: 0, y: 0 };
+
+const canvas = document.getElementById('sim');
+const ctx = canvas.getContext('2d');
+let W = 0, H = 0, dpr = 1, S = 40; // S = pixels per σ
+
+const css = getComputedStyle(document.documentElement);
+const tok = (n) => css.getPropertyValue(n).trim();
+const COL = {
+  hydro: tok('--hydro'), hydroDim: tok('--hydro-dim'), polar: tok('--polar'),
+  bond: tok('--bond'), ink: tok('--ink'), haze: tok('--haze'),
+};
+const hexRgb = (h) => { const n = parseInt(h.slice(1), 16); return [n >> 16 & 255, n >> 8 & 255, n & 255]; };
+const RGB = { hydro: hexRgb(COL.hydro), polar: hexRgb(COL.polar), ink: hexRgb(COL.ink) };
+
+// Gaussian noise (Box–Muller, one cached value)
+let spare = null;
+function gauss() {
+  if (spare !== null) { const s = spare; spare = null; return s; }
+  let u = 0, v = 0;
+  while (u === 0) u = Math.random();
+  v = Math.random();
+  const m = Math.sqrt(-2 * Math.log(u));
+  spare = m * Math.sin(2 * Math.PI * v);
+  return m * Math.cos(2 * Math.PI * v);
+}
+
+// ---------- Chain setup ----------
+function buildChain() {
+  seqDef = SEQUENCES.find(s => s.id === settings.seq) || SEQUENCES[3];
+  seq = seqDef.seq || randomSeq(40);
+  N = seq.length;
+  isH = new Uint8Array(N);
+  for (let i = 0; i < N; i++) isH[i] = seq[i] === 'H' ? 1 : 0;
+  x = new Float64Array(N); y = new Float64Array(N);
+  vx = new Float64Array(N); vy = new Float64Array(N);
+  fx = new Float64Array(N); fy = new Float64Array(N);
+  nContacts = new Uint8Array(N);
+  contactNow = new Uint8Array(N * N);
+  contactAvg = new Float32Array(N * N);
+  // Persistent random walk: an extended, unfolded starting coil.
+  let a = Math.random() * Math.PI * 2;
+  for (let i = 1; i < N; i++) {
+    a += (Math.random() - 0.5) * 1.1;
+    x[i] = x[i - 1] + Math.cos(a);
+    y[i] = y[i - 1] + Math.sin(a);
+  }
+  let cx = 0, cy = 0;
+  for (let i = 0; i < N; i++) { cx += x[i]; cy += y[i]; }
+  cx /= N; cy /= N;
+  for (let i = 0; i < N; i++) { x[i] -= cx; y[i] -= cy; }
+  hist = [];
+  bestE = 0;
+  grabbed = -1;
+  setPhase('hot');
+  phaseT = 2.5; // brief denatured hold, then cool and fold
+  cmap.width = N; cmap.height = N;
+  cmapImg = cmapCtx.createImageData(N, N);
+  buildSeqStrip();
+  resize();
+}
+
+// ---------- Forces ----------
+function computeForces(measure) {
+  fx.fill(0); fy.fill(0);
+  if (measure) { contactNow.fill(0); nContacts.fill(0); pairs.length = 0; }
+  let E = 0, cc = 0;
+
+  // Bonds
+  for (let i = 0; i < N - 1; i++) {
+    const dx = x[i + 1] - x[i], dy = y[i + 1] - y[i];
+    const r = Math.sqrt(dx * dx + dy * dy) || 1e-6;
+    let f = KB * (r - 1) / r;
+    if (Math.abs(f * r) > FMAX) f = Math.sign(f) * FMAX / r;
+    fx[i] += f * dx; fy[i] += f * dy;
+    fx[i + 1] -= f * dx; fy[i + 1] -= f * dy;
+  }
+
+  // Bending: U = k(1 - cos θ) between consecutive bond vectors
+  for (let i = 0; i < N - 2; i++) {
+    const ux = x[i + 1] - x[i], uy = y[i + 1] - y[i];
+    const wx = x[i + 2] - x[i + 1], wy = y[i + 2] - y[i + 1];
+    const lu = Math.sqrt(ux * ux + uy * uy) || 1e-6, lw = Math.sqrt(wx * wx + wy * wy) || 1e-6;
+    const c = (ux * wx + uy * wy) / (lu * lw);
+    const dcux = wx / (lu * lw) - c * ux / (lu * lu), dcuy = wy / (lu * lw) - c * uy / (lu * lu);
+    const dcwx = ux / (lu * lw) - c * wx / (lw * lw), dcwy = uy / (lu * lw) - c * wy / (lw * lw);
+    const fax = -KANG * dcux, fay = -KANG * dcuy;
+    const fcx = KANG * dcwx, fcy = KANG * dcwy;
+    fx[i] += fax; fy[i] += fay;
+    fx[i + 2] += fcx; fy[i + 2] += fcy;
+    fx[i + 1] -= fax + fcx; fy[i + 1] -= fay + fcy;
+  }
+
+  // Non-bonded: H–H attract (Lennard-Jones), everything else only repels (WCA)
+  for (let i = 0; i < N - 2; i++) {
+    const xi = x[i], yi = y[i], hi = isH[i];
+    for (let j = i + 2; j < N; j++) {
+      const dx = xi - x[j], dy = yi - y[j];
+      let r2 = dx * dx + dy * dy;
+      const hh = hi && isH[j];
+      const cut = hh ? RC2 : WCA2;
+      if (r2 >= cut) continue;
+      if (r2 < 0.04) r2 = 0.04;
+      const inv2 = 1 / r2, s6 = inv2 * inv2 * inv2, s12 = s6 * s6;
+      let f = 24 * EPS * (2 * s12 - s6) * inv2;
+      const fr = f * Math.sqrt(r2);
+      if (fr > FMAX) f = FMAX / Math.sqrt(r2);
+      fx[i] += f * dx; fy[i] += f * dy;
+      fx[j] -= f * dx; fy[j] -= f * dy;
+      if (measure) {
+        if (hh) {
+          E += 4 * EPS * (s12 - s6) - LJ_SHIFT;
+          if (r2 < CONTACT2) {
+            cc++;
+            contactNow[i * N + j] = 1;
+            nContacts[i]++; nContacts[j]++;
+            pairs.push(i, j);
+          }
+        } else {
+          E += 4 * EPS * (s12 - s6) + EPS;
+        }
+      }
+    }
+  }
+
+  // Keep the molecule near the middle of the screen, and inside it
+  let cx = 0, cy = 0;
+  for (let i = 0; i < N; i++) { cx += x[i]; cy += y[i]; }
+  cx /= N; cy /= N;
+  const hw = W / 2 / S - 0.8, hh2 = H / 2 / S - 0.8;
+  for (let i = 0; i < N; i++) {
+    fx[i] -= 0.03 * cx; fy[i] -= 0.03 * cy;
+    if (x[i] > hw) fx[i] -= 60 * (x[i] - hw); else if (x[i] < -hw) fx[i] -= 60 * (x[i] + hw);
+    if (y[i] > hh2) fy[i] -= 60 * (y[i] - hh2); else if (y[i] < -hh2) fy[i] -= 60 * (y[i] + hh2);
+  }
+
+  // Finger pulling a bead
+  if (grabbed >= 0) {
+    let px = 40 * (target.x - x[grabbed]), py = 40 * (target.y - y[grabbed]);
+    const m = Math.hypot(px, py);
+    if (m > FMAX) { px *= FMAX / m; py *= FMAX / m; }
+    fx[grabbed] += px; fy[grabbed] += py;
+  }
+
+  if (measure) {
+    energy = E;
+    contactCount = cc;
+    let s = 0;
+    for (let i = 0; i < N; i++) s += (x[i] - cx) ** 2 + (y[i] - cy) ** 2;
+    rg = Math.sqrt(s / N);
+  }
+}
+
+// Langevin dynamics: velocity update, friction + thermal kicks, drift
+function step(measure) {
+  computeForces(measure);
+  const c1 = Math.exp(-GAMMA * DT), c2 = Math.sqrt((1 - c1 * c1) * T);
+  for (let i = 0; i < N; i++) {
+    vx[i] = (vx[i] + fx[i] * DT) * c1 + c2 * gauss();
+    vy[i] = (vy[i] + fy[i] * DT) * c1 + c2 * gauss();
+    x[i] += vx[i] * DT;
+    y[i] += vy[i] * DT;
+  }
+}
+
+// ---------- Temperature schedule ----------
+const PHASE_LABEL = { fold: 'Folding', heat: 'Heating', hot: 'Denatured', cool: 'Cooling' };
+function setPhase(p) {
+  phase = p;
+  phaseT = 0;
+  if (p === 'heat') bestE = 0;
+}
+function unfold() {
+  if (phase === 'fold' || phase === 'cool') setPhase('heat');
+}
+function updateSchedule(dt) {
+  phaseT += dt;
+  if (phase === 'fold') {
+    T = T_FOLD;
+    if (settings.cycle > 0 && phaseT > settings.cycle) setPhase('heat');
+  } else if (phase === 'heat') {
+    T = T_FOLD + (T_HOT - T_FOLD) * Math.min(1, phaseT / 2.5);
+    if (phaseT > 2.5) setPhase('hot');
+  } else if (phase === 'hot') {
+    T = T_HOT;
+    if (phaseT > 4) setPhase('cool');
+  } else {
+    const k = Math.min(1, phaseT / 8);
+    T = T_HOT + (T_FOLD - T_HOT) * (1 - (1 - k) * (1 - k));
+    if (k >= 1) setPhase('fold');
+  }
+}
+
+// ---------- Solvent (ambient only: it jiggles faster when hot) ----------
+let solvent = [];
+function seedSolvent() {
+  const n = Math.min(420, Math.floor(W * H / 8000));
+  solvent = [];
+  for (let i = 0; i < n; i++) {
+    solvent.push({ x: Math.random() * W, y: Math.random() * H, vx: 0, vy: 0, a: 0.08 + Math.random() * 0.14 });
+  }
+}
+function updateSolvent(dt) {
+  const kick = Math.sqrt(T) * (reduceMotion ? 40 : 140) * Math.sqrt(dt);
+  const damp = Math.exp(-2 * dt);
+  for (const p of solvent) {
+    p.vx = p.vx * damp + gauss() * kick;
+    p.vy = p.vy * damp + gauss() * kick;
+    p.x += p.vx * dt; p.y += p.vy * dt;
+    if (p.x < 0) p.x += W; else if (p.x > W) p.x -= W;
+    if (p.y < 0) p.y += H; else if (p.y > H) p.y -= H;
+  }
+}
+
+// ---------- Rendering ----------
+let ripples = [];
+function resize() {
+  dpr = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * dpr);
+  canvas.height = Math.round(H * dpr);
+  S = Math.min(W, H) / (3.4 * Math.sqrt(N || 48));
+  seedSolvent();
+  sizeSpark();
+}
+const toWorld = (sx, sy) => ({ x: (sx - W / 2) / S, y: (sy - H / 2) / S });
+
+function draw(now) {
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+
+  // Solvent
+  for (const p of solvent) {
+    ctx.fillStyle = `rgba(${RGB.polar[0]},${RGB.polar[1]},${RGB.polar[2]},${p.a})`;
+    ctx.fillRect(p.x, p.y, 1.6, 1.6);
+  }
+
+  // Tap ripples
+  ripples = ripples.filter(r => now - r.t < 700);
+  for (const r of ripples) {
+    const k = (now - r.t) / 700;
+    ctx.beginPath();
+    ctx.arc(r.x, r.y, 8 + k * 4 * S, 0, Math.PI * 2);
+    ctx.strokeStyle = `rgba(${RGB.polar[0]},${RGB.polar[1]},${RGB.polar[2]},${0.35 * (1 - k)})`;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
+
+  // World space: 1 unit = one bead diameter (σ)
+  ctx.setTransform(dpr * S, 0, 0, dpr * S, dpr * W / 2, dpr * H / 2);
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+
+  // H–H contacts: the hydrophobic core as a network
+  if (pairs.length) {
+    ctx.beginPath();
+    for (let k = 0; k < pairs.length; k += 2) {
+      const i = pairs[k], j = pairs[k + 1];
+      ctx.moveTo(x[i], y[i]);
+      ctx.lineTo(x[j], y[j]);
+    }
+    ctx.strokeStyle = `rgba(${RGB.hydro[0]},${RGB.hydro[1]},${RGB.hydro[2]},0.28)`;
+    ctx.lineWidth = 0.07;
+    ctx.stroke();
+  }
+
+  // Backbone, smoothed through bead centres
+  ctx.beginPath();
+  ctx.moveTo(x[0], y[0]);
+  for (let i = 1; i < N - 1; i++) {
+    ctx.quadraticCurveTo(x[i], y[i], (x[i] + x[i + 1]) / 2, (y[i] + y[i + 1]) / 2);
+  }
+  ctx.lineTo(x[N - 1], y[N - 1]);
+  ctx.strokeStyle = COL.bond;
+  ctx.lineWidth = 0.2;
+  ctx.stroke();
+
+  // Beads
+  for (let i = 0; i < N; i++) {
+    if (isH[i]) {
+      const buried = nContacts[i] > 0;
+      if (buried) {
+        ctx.beginPath();
+        ctx.arc(x[i], y[i], 0.8, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(${RGB.hydro[0]},${RGB.hydro[1]},${RGB.hydro[2]},${Math.min(0.08 * nContacts[i], 0.22)})`;
+        ctx.fill();
+      }
+      ctx.beginPath();
+      ctx.arc(x[i], y[i], 0.4, 0, Math.PI * 2);
+      ctx.fillStyle = buried ? COL.hydro : COL.hydroDim;
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(x[i] - 0.12, y[i] - 0.12, 0.13, 0, Math.PI * 2);
+      ctx.fillStyle = buried ? 'rgba(255,240,215,0.55)' : 'rgba(255,240,215,0.18)';
+      ctx.fill();
+    } else {
+      ctx.beginPath();
+      ctx.arc(x[i], y[i], 0.3, 0, Math.PI * 2);
+      ctx.fillStyle = COL.ink;
+      ctx.fill();
+      ctx.strokeStyle = COL.polar;
+      ctx.lineWidth = 0.1;
+      ctx.stroke();
+    }
+    if (i === grabbed) {
+      ctx.beginPath();
+      ctx.arc(x[i], y[i], 0.75, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(228,232,243,0.6)';
+      ctx.lineWidth = 0.06;
+      ctx.stroke();
+    }
+  }
+
+  // Termini labels
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.font = `500 ${Math.max(9, Math.round(S * 0.32))}px ${css.getPropertyValue('--f-data')}`;
+  ctx.fillStyle = COL.haze;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  const label = (i, j, t) => {
+    const dx = x[i] - x[j], dy = y[i] - y[j], m = Math.hypot(dx, dy) || 1;
+    ctx.fillText(t, W / 2 + (x[i] + dx / m * 0.85) * S, H / 2 + (y[i] + dy / m * 0.85) * S);
+  };
+  label(0, 1, 'N');
+  label(N - 1, N - 2, 'C');
+}
+
+// ---------- Readout ----------
+const $ = (id) => document.getElementById(id);
+const hudEl = $('hud'), phaseEl = $('phase'), phaseText = $('phaseText'), tempEl = $('temp');
+const energyEl = $('energy'), contactsEl = $('contacts'), rgEl = $('rg'), seqNameEl = $('seqName');
+const seqStrip = $('seqStrip');
+const spark = $('spark'), sparkCtx = spark.getContext('2d');
+const cmap = $('cmap'), cmapCtx = cmap.getContext('2d');
+let cmapImg = null;
+let seqCells = [];
+const fmt = (v, d = 1) => (v < -0.05 ? '−' : '') + Math.abs(v).toFixed(d);
+
+function buildSeqStrip() {
+  seqStrip.textContent = '';
+  seqCells = [];
+  for (let i = 0; i < N; i++) {
+    const c = document.createElement('i');
+    c.className = isH[i] ? 'h' : 'p';
+    seqStrip.appendChild(c);
+    seqCells.push(c);
+  }
+  const hCount = isH.reduce((a, b) => a + b, 0);
+  seqNameEl.textContent = `${seqDef.name} · ${hCount} H / ${N - hCount} P`;
+}
+function sizeSpark() {
+  const r = spark.getBoundingClientRect();
+  spark.width = Math.max(1, Math.round(r.width * dpr));
+  spark.height = Math.max(1, Math.round(r.height * dpr));
+}
+function drawSpark() {
+  const w = spark.width, h = spark.height;
+  sparkCtx.clearRect(0, 0, w, h);
+  if (hist.length < 2) return;
+  let lo = Math.min(...hist, bestE), hi = Math.max(...hist, 0);
+  if (hi - lo < 2) lo = hi - 2;
+  const pad = 3 * dpr;
+  const X = (i) => (i / (HIST_LEN - 1)) * w;
+  const Y = (v) => pad + (1 - (v - lo) / (hi - lo)) * (h - 2 * pad);
+  const off = HIST_LEN - hist.length;
+  // lowest energy reached since the last unfold
+  sparkCtx.setLineDash([2 * dpr, 3 * dpr]);
+  sparkCtx.strokeStyle = 'rgba(138,148,176,0.5)';
+  sparkCtx.lineWidth = dpr;
+  sparkCtx.beginPath();
+  sparkCtx.moveTo(0, Y(bestE)); sparkCtx.lineTo(w, Y(bestE));
+  sparkCtx.stroke();
+  sparkCtx.setLineDash([]);
+  sparkCtx.beginPath();
+  hist.forEach((v, i) => { const px = X(i + off), py = Y(v); i ? sparkCtx.lineTo(px, py) : sparkCtx.moveTo(px, py); });
+  sparkCtx.lineTo(w, h); sparkCtx.lineTo(X(off), h); sparkCtx.closePath();
+  sparkCtx.fillStyle = `rgba(${RGB.hydro[0]},${RGB.hydro[1]},${RGB.hydro[2]},0.12)`;
+  sparkCtx.fill();
+  sparkCtx.beginPath();
+  hist.forEach((v, i) => { const px = X(i + off), py = Y(v); i ? sparkCtx.lineTo(px, py) : sparkCtx.moveTo(px, py); });
+  sparkCtx.strokeStyle = COL.hydro;
+  sparkCtx.lineWidth = 1.5 * dpr;
+  sparkCtx.stroke();
+  sparkCtx.beginPath();
+  sparkCtx.arc(w - 2.5 * dpr, Y(hist[hist.length - 1]), 2.5 * dpr, 0, Math.PI * 2);
+  sparkCtx.fillStyle = COL.hydro;
+  sparkCtx.fill();
+}
+// Upper triangle: contacts right now. Lower triangle: how often each contact has formed recently.
+function drawCmap() {
+  const d = cmapImg.data, [br, bg, bb] = [18, 25, 44];
+  for (let i = 0; i < N; i++) {
+    for (let j = 0; j < N; j++) {
+      const o = (i * N + j) * 4;
+      let r = br, g = bg, b = bb;
+      if (i === j) { r = 70; g = 80; b = 108; }
+      else if (j > i) {
+        if (contactNow[i * N + j]) [r, g, b] = RGB.hydro;
+      } else {
+        const a = Math.min(1, contactAvg[j * N + i] * 1.4);
+        r = br + (RGB.polar[0] - br) * a; g = bg + (RGB.polar[1] - bg) * a; b = bb + (RGB.polar[2] - bb) * a;
+      }
+      d[o] = r; d[o + 1] = g; d[o + 2] = b; d[o + 3] = 255;
+    }
+  }
+  cmapCtx.putImageData(cmapImg, 0, 0);
+}
+
+const HIST_LEN = 240; // 4 samples/s → 60 s
+let lastHud = 0;
+function hudTick(now) {
+  if (now - lastHud < 250) return;
+  lastHud = now;
+  hist.push(energy);
+  if (hist.length > HIST_LEN) hist.shift();
+  if (energy < bestE) bestE = energy;
+  for (let k = 0; k < N * N; k++) contactAvg[k] = contactAvg[k] * 0.97 + contactNow[k] * 0.03;
+  if (!settings.hud) return;
+  phaseText.textContent = PHASE_LABEL[phase];
+  phaseEl.dataset.hot = String(phase === 'heat' || phase === 'hot');
+  tempEl.textContent = `T* ${T.toFixed(2)}`;
+  energyEl.innerHTML = `${fmt(energy)} <small>ε</small>`;
+  contactsEl.textContent = contactCount;
+  rgEl.innerHTML = `${rg.toFixed(1)} <small>σ</small>`;
+  for (let i = 0; i < N; i++) if (isH[i]) seqCells[i].classList.toggle('on', nContacts[i] > 0);
+  drawSpark();
+  drawCmap();
+}
+
+// ---------- Main loop ----------
+let last = performance.now();
+function frame(now) {
+  requestAnimationFrame(frame);
+  if (settings.saver && now - last < 32) return;
+  const dt = Math.min((now - last) / 1000, 0.1);
+  last = now;
+  updateSchedule(dt);
+  const steps = Math.min(300, Math.max(1, Math.round(settings.speed * 3000 * dt)));
+  for (let s = 0; s < steps; s++) step(s === steps - 1);
+  updateSolvent(dt);
+  draw(now);
+  hudTick(now);
+}
+
+// ---------- Touch ----------
+let down = null, lastTap = null, pressTimer = 0;
+canvas.addEventListener('pointerdown', (e) => {
+  if (!sheet.hidden) { closeSheet(); return; }
+  try { canvas.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+  const p = toWorld(e.clientX, e.clientY);
+  let best = -1, bd = 1.6 * 1.6;
+  for (let i = 0; i < N; i++) {
+    const d = (x[i] - p.x) ** 2 + (y[i] - p.y) ** 2;
+    if (d < bd) { bd = d; best = i; }
+  }
+  grabbed = best;
+  target = p;
+  down = { id: e.pointerId, sx: e.clientX, sy: e.clientY, t: performance.now(), moved: false, long: false };
+  clearTimeout(pressTimer);
+  pressTimer = setTimeout(() => {
+    if (down && !down.moved) { down.long = true; grabbed = -1; openSheet(); }
+  }, 650);
+});
+canvas.addEventListener('pointermove', (e) => {
+  if (!down || e.pointerId !== down.id) return;
+  if (!down.moved && Math.hypot(e.clientX - down.sx, e.clientY - down.sy) > 8) {
+    down.moved = true;
+    clearTimeout(pressTimer);
+  }
+  if (grabbed >= 0) target = toWorld(e.clientX, e.clientY);
+});
+function endPointer(e) {
+  if (!down || e.pointerId !== down.id) return;
+  clearTimeout(pressTimer);
+  const now = performance.now();
+  if (!down.moved && !down.long && now - down.t < 350) {
+    if (grabbed < 0) poke(e.clientX, e.clientY);
+    if (lastTap && now - lastTap.t < 330 && Math.hypot(e.clientX - lastTap.x, e.clientY - lastTap.y) < 50) {
+      unfold();
+      lastTap = null;
+    } else {
+      lastTap = { t: now, x: e.clientX, y: e.clientY };
+    }
+  }
+  grabbed = -1;
+  down = null;
+}
+canvas.addEventListener('pointerup', endPointer);
+canvas.addEventListener('pointercancel', endPointer);
+
+function poke(sx, sy) {
+  ripples.push({ x: sx, y: sy, t: performance.now() });
+  const p = toWorld(sx, sy);
+  for (let i = 0; i < N; i++) {
+    const dx = x[i] - p.x, dy = y[i] - p.y, d = Math.hypot(dx, dy);
+    if (d < 4 && d > 0.01) { const k = 5 * (1 - d / 4) / d; vx[i] += dx * k; vy[i] += dy * k; }
+  }
+  for (const s of solvent) {
+    const dx = s.x - sx, dy = s.y - sy, d = Math.hypot(dx, dy), R = 4 * S;
+    if (d < R && d > 1) { const k = 260 * (1 - d / R) / d; s.vx += dx * k; s.vy += dy * k; }
+  }
+}
+
+// ---------- Settings panel ----------
+const sheet = $('sheet'), gear = $('gear');
+const seqSel = $('seqSel'), speed = $('speed'), speedOut = $('speedOut'), cycle = $('cycle');
+const showHud = $('showHud'), saver = $('saver');
+for (const s of SEQUENCES) {
+  const o = document.createElement('option');
+  o.value = s.id; o.textContent = s.seq ? `${s.name} (${s.seq.length})` : s.name;
+  seqSel.appendChild(o);
+}
+function syncForm() {
+  seqSel.value = settings.seq;
+  speed.value = settings.speed;
+  speedOut.textContent = `${settings.speed}×`;
+  cycle.value = String(settings.cycle);
+  showHud.checked = settings.hud;
+  saver.checked = settings.saver;
+  document.body.classList.toggle('no-hud', !settings.hud);
+}
+function openSheet() { sheet.hidden = false; gear.setAttribute('aria-expanded', 'true'); }
+function closeSheet() { sheet.hidden = true; gear.setAttribute('aria-expanded', 'false'); }
+gear.addEventListener('click', () => (sheet.hidden ? openSheet() : closeSheet()));
+$('closeSheet').addEventListener('click', closeSheet);
+sheet.addEventListener('submit', (e) => e.preventDefault());
+seqSel.addEventListener('change', () => { settings.seq = seqSel.value; saveSettings(); buildChain(); });
+speed.addEventListener('input', () => { settings.speed = parseFloat(speed.value); speedOut.textContent = `${settings.speed}×`; saveSettings(); });
+cycle.addEventListener('change', () => { settings.cycle = parseInt(cycle.value, 10); saveSettings(); });
+showHud.addEventListener('change', () => {
+  settings.hud = showHud.checked; saveSettings(); syncForm();
+  if (settings.hud) { sizeSpark(); lastHud = 0; }
+});
+saver.addEventListener('change', () => { settings.saver = saver.checked; saveSettings(); });
+$('unfoldBtn').addEventListener('click', () => { unfold(); closeSheet(); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeSheet(); });
+
+window.addEventListener('resize', resize);
+if (clean && !localStorage_has()) settings.hud = false;
+function localStorage_has() { try { return localStorage.getItem(STORE_KEY) !== null; } catch (e) { return false; } }
+
+syncForm();
+buildChain();
+requestAnimationFrame((t) => { last = t; frame(t); });
+})();
+</script>
+</body>
+</html>
