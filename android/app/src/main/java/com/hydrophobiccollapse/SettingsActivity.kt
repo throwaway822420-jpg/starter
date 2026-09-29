@@ -118,14 +118,7 @@ class SettingsActivity : Activity() {
         col.addView(body("Real protein sequences folding in 3D, with pH-driven proton transfers and disulfide chemistry."), margins(top = 4))
         col.addView(button("Set as wallpaper", primary = true) { setWallpaper() }, margins(top = 14))
 
-        col.addView(section("Protein"))
-        val note = body(Proteins.byId(s.protein).note)
-        val names = Proteins.all.map { "${it.name} (${it.seq.length})" }
-        col.addView(spinner(names, Proteins.all.indexOfFirst { it.id == s.protein }.coerceAtLeast(0)) { idx ->
-            val p = Proteins.all[idx]
-            if (p.id != s.protein) { note.text = p.note; update(s.copy(protein = p.id)) }
-        }, margins(top = 6))
-        col.addView(note, margins(top = 6))
+        buildProteinSection(col)
 
         col.addView(section("Solution"))
         col.addView(slider("Temperature", 270f, 420f, 5f, s.temp.toFloat(), { "${it.roundToInt()} K · ${it.roundToInt() - 273} °C" }) { update(s.copy(temp = it.roundToInt())) })
@@ -150,13 +143,220 @@ class SettingsActivity : Activity() {
         row.addView(button("Heat to unfold", primary = false) {
             preview.sim.heat(); Settings.sendCommand(prefs, Settings.CMD_HEAT)
         }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginEnd = dp(8) })
-        row.addView(button("New chain", primary = false) {
-            preview.sim.reset(); Settings.sendCommand(prefs, Settings.CMD_RESET)
+        row.addView(button("Start over", primary = false) {
+            preview.sim.reset(); Settings.sendCommand(prefs, Settings.CMD_RESET); refreshProteinUi()
         }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
         col.addView(row, margins(top = 14))
 
         col.addView(TextView(this).apply { text = colourKey(); textSize = 12f; setLineSpacing(0f, 1.35f) }, margins(top = 16))
         col.addView(body("Drag a residue to pull it. Drag open space here to turn the molecule; on the home screen, swiping between pages turns it. Tap to stir the water. Double-tap to heat and unfold."), margins(top = 12))
+    }
+
+    // ---------- Protein picker, random mode and your own proteins ----------
+    private class Entry(val id: String, val label: String)
+    private lateinit var proteinSpinner: Spinner
+    private lateinit var proteinNote: TextView
+    private lateinit var editRow: LinearLayout
+    private lateinit var randomBox: LinearLayout
+    private var entries = listOf<Entry>()
+
+    private fun proteinEntries(): List<Entry> {
+        val list = ArrayList<Entry>()
+        list.add(Entry(Proteins.RANDOM_ID, "Random protein (new each time)"))
+        for (p in Proteins.customs(s.customJson)) list.add(Entry(p.id, "★ ${p.name} (${p.length})"))
+        for (p in Proteins.presets) list.add(Entry(p.id, "${p.name} (${p.length})"))
+        return list
+    }
+
+    private fun buildProteinSection(col: LinearLayout) {
+        col.addView(section("Protein"))
+        proteinSpinner = Spinner(this).apply {
+            setPadding(dp(10), dp(8), dp(10), dp(8))
+            background = GradientDrawable().apply { setColor(colInk); cornerRadius = dp(6).toFloat(); setStroke(dp(1), colLine) }
+            setPopupBackgroundDrawable(GradientDrawable().apply { setColor(0xFF141B2E.toInt()); cornerRadius = dp(6).toFloat() })
+            onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+                override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                    (view as? TextView)?.setTextColor(colText)
+                    val e = entries.getOrNull(position) ?: return
+                    if (e.id != s.protein) { update(s.copy(protein = e.id)); refreshProteinUi() }
+                }
+                override fun onNothingSelected(parent: AdapterView<*>?) {}
+            }
+        }
+        col.addView(proteinSpinner, margins(top = 6))
+        proteinNote = body("")
+        col.addView(proteinNote, margins(top = 6))
+
+        // Random mode
+        randomBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        randomBox.addView(logSlider("Random length", 20, Proteins.MAX_RESIDUES, s.randomLength) { update(s.copy(randomLength = it)); refreshProteinUi() })
+        randomBox.addView(label("Style"), margins(top = 10))
+        randomBox.addView(spinner(Proteins.RANDOM_STYLES, s.randomStyle.coerceIn(0, 2)) { idx ->
+            if (idx != s.randomStyle) { update(s.copy(randomStyle = idx)); refreshProteinUi() }
+        }, margins(top = 4))
+        randomBox.addView(switch("New protein each time the screen turns on", s.randomOnWake) { update(s.copy(randomOnWake = it)) }, margins(top = 8))
+        col.addView(randomBox, margins(top = 4))
+
+        // Your own proteins
+        val create = button("Create a protein…", primary = false) { openEditor(null) }
+        col.addView(create, margins(top = 10))
+        editRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        editRow.addView(button("Edit", primary = false) { openEditor(s.protein) }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginEnd = dp(8) })
+        editRow.addView(button("Delete", primary = false) { confirmDelete(s.protein) }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        col.addView(editRow, margins(top = 8))
+        refreshProteinUi()
+    }
+
+    private fun refreshProteinUi() {
+        entries = proteinEntries()
+        val labels = entries.map { it.label }
+        proteinSpinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, labels).apply {
+            setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        }
+        val idx = entries.indexOfFirst { it.id == s.protein }.let { if (it < 0) entries.indexOfFirst { e -> e.id == "bpti" } else it }
+        proteinSpinner.setSelection(idx, false)
+        val isRandom = s.protein == Proteins.RANDOM_ID
+        val isCustom = s.protein.startsWith("custom:")
+        randomBox.visibility = if (isRandom) View.VISIBLE else View.GONE
+        editRow.visibility = if (isCustom) View.VISIBLE else View.GONE
+        val p = preview.sim.protein
+        proteinNote.text = when {
+            isRandom -> "Now showing: ${p.name}. ${p.note}${slowHint(p.length)}"
+            else -> Proteins.byId(s.protein, s.customJson).let { it.note + slowHint(it.length) }
+        }
+    }
+
+    private fun slowHint(len: Int) = when {
+        len > 1500 -> " Very large: it will fold slowly on a tablet."
+        len > 600 -> " Large: expect slower motion."
+        else -> ""
+    }
+
+    private fun openEditor(existingId: String?) {
+        val entry = existingId?.let { Proteins.customJsonEntry(s.customJson, it) }
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(8), dp(20), dp(4)) }
+        val name = android.widget.EditText(this).apply {
+            hint = "Name"; setSingleLine(); setTextColor(colText)
+            setText(entry?.optString("name") ?: "")
+        }
+        box.addView(name)
+        val seqField = android.widget.EditText(this).apply {
+            hint = "Paste one-letter codes or FASTA.\nUse / between chains."
+            typeface = Typeface.MONOSPACE; textSize = 14f; setTextColor(colText)
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE or
+                android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS or android.text.InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
+            minLines = 4; maxLines = 10; gravity = Gravity.TOP or Gravity.START
+            setText(entry?.optJSONArray("chains")?.let { a -> (0 until a.length()).joinToString(" / ") { a.getString(it) } } ?: "")
+        }
+        box.addView(seqField, margins(top = 8))
+        var copies = entry?.optInt("copies", 1) ?: 1
+        val copiesOut = TextView(this).apply { setTextColor(colText); textSize = 12f; typeface = Typeface.MONOSPACE }
+        val status = TextView(this).apply { textSize = 12f; setLineSpacing(0f, 1.2f) }
+        fun validate(): Proteins.Parsed {
+            val parsed = Proteins.parse(seqField.text.toString())
+            val total = parsed.chains.sumOf { it.length } * copies
+            copiesOut.text = if (copies == 1) "1 copy" else "$copies copies"
+            when {
+                parsed.error != null -> { status.setTextColor(0xFFFF7D8E.toInt()); status.text = parsed.error }
+                total > Proteins.MAX_RESIDUES -> { status.setTextColor(0xFFFF7D8E.toInt()); status.text = "$total residues in total. The limit is ${Proteins.MAX_RESIDUES}; shorten it or use fewer copies." }
+                else -> {
+                    val nCh = parsed.chains.size * copies
+                    status.setTextColor(colHaze)
+                    status.text = "$total residues · $nCh chain${if (nCh > 1) "s" else ""}.${slowHint(total)}"
+                }
+            }
+            return parsed
+        }
+        val copiesHead = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        copiesHead.addView(label("Copies in the box (to watch them interact)"), LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        copiesHead.addView(copiesOut)
+        box.addView(copiesHead, margins(top = 12))
+        box.addView(SeekBar(this).apply {
+            max = Proteins.MAX_COPIES - 1; progress = copies - 1
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) { copies = p + 1; validate() }
+                override fun onStartTrackingTouch(sb: SeekBar?) {}
+                override fun onStopTrackingTouch(sb: SeekBar?) {}
+            })
+        }, margins(top = 2))
+        val helpers = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        helpers.addView(button("Random fill", primary = false) {
+            seqField.setText(Proteins.random(60, 1).chains[0]); if (name.text.isBlank()) name.setText("My helix bundle")
+        }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginEnd = dp(8) })
+        helpers.addView(button("Clear", primary = false) { seqField.setText("") }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        box.addView(helpers, margins(top = 10))
+        box.addView(status, margins(top = 10))
+        seqField.addTextChangedListener(object : android.text.TextWatcher {
+            override fun afterTextChanged(e: android.text.Editable?) { validate() }
+            override fun beforeTextChanged(t: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun onTextChanged(t: CharSequence?, a: Int, b: Int, c: Int) {}
+        })
+        validate()
+        val scroll = ScrollView(this).apply { addView(box) }
+        val dialog = android.app.AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+            .setTitle(if (entry != null) "Edit protein" else "Create a protein")
+            .setView(scroll)
+            .setPositiveButton("Save and fold", null)
+            .setNegativeButton("Cancel", null)
+            .create()
+        dialog.setOnShowListener {
+            dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE).setTextColor(colHydro)
+            dialog.getButton(android.app.AlertDialog.BUTTON_NEGATIVE).setTextColor(colHaze)
+            dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val parsed = validate()
+                val total = parsed.chains.sumOf { it.length } * copies
+                if (parsed.error != null || total > Proteins.MAX_RESIDUES) return@setOnClickListener
+                val title = name.text.toString().trim().ifEmpty { "My protein" }
+                val (json, id) = Proteins.saveCustom(s.customJson, existingId, title, parsed.chains, copies)
+                update(s.copy(customJson = json, protein = id))
+                refreshProteinUi()
+                dialog.dismiss()
+            }
+        }
+        dialog.show()
+    }
+
+    private fun confirmDelete(id: String) {
+        val p = Proteins.customs(s.customJson).firstOrNull { it.id == id } ?: return
+        android.app.AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+            .setTitle("Delete ${p.name}?")
+            .setMessage("This removes it from your proteins. It can't be undone.")
+            .setPositiveButton("Delete") { _, _ ->
+                update(s.copy(customJson = Proteins.deleteCustom(s.customJson, id), protein = "bpti"))
+                refreshProteinUi()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    /** A slider on a log scale, for lengths from tens to thousands. */
+    private fun logSlider(name: String, min: Int, max: Int, value: Int, onChange: (Int) -> Unit): View {
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; layoutParams = margins(top = 10) }
+        val head = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        head.addView(label(name), LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        val out = TextView(this).apply { setTextColor(colText); textSize = 12f; typeface = Typeface.MONOSPACE }
+        head.addView(out)
+        box.addView(head)
+        val ratio = max.toDouble() / min
+        fun toLen(p: Int): Int {
+            val raw = min * Math.pow(ratio, p / 1000.0)
+            val step = if (raw < 100) 5 else if (raw < 1000) 10 else 50
+            return ((raw / step).roundToInt() * step).coerceIn(min, max)
+        }
+        fun label(v: Int) = "$v residues"
+        out.text = label(value)
+        box.addView(SeekBar(this).apply {
+            this.max = 1000
+            progress = (1000 * Math.log(value.toDouble() / min) / Math.log(ratio)).roundToInt().coerceIn(0, 1000)
+            setPadding(dp(4), dp(8), dp(4), dp(8))
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) { out.text = label(toLen(p)) }
+                override fun onStartTrackingTouch(sb: SeekBar?) {}
+                // Apply on release: every change makes a new protein
+                override fun onStopTrackingTouch(sb: SeekBar?) { onChange(toLen(sb?.progress ?: 0)) }
+            })
+        }, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        return box
     }
 
     private fun redoxLabel(r: Float) = when {

@@ -43,18 +43,34 @@ Each bead is one amino acid, placed at its Cα atom. The chain moves under Lange
 - **Constant-pH titration:** Asp, Glu, His, Cys, Tyr, Lys, Arg and both chain ends gain and lose protons. Each change is accepted or rejected using the pKa, the pH and the local electrostatic field, so buried or crowded charges shift on their own.
 - **Disulfide chemistry:** two cysteines within reach can oxidize into a disulfide. This needs a thiolate (a deprotonated cysteine), so it depends on pH. The redox buffer reduces disulfides back. A free thiolate can attack an existing disulfide and swap partners. This thiol–disulfide shuffling is how BPTI finds its three native bonds.
 
+**Several chains:** chains interact through exactly the same contact, electrostatic and disulfide terms as residues within one chain. That's how insulin's chains pair up, how hemoglobin subunits stick together, and how amyloid peptides clump. The readout counts the contacts between chains and the size of the largest complex.
+
+**Scaling:** non-bonded pairs come from neighbour lists rebuilt on a spatial grid, so the cost grows roughly linearly with size. A 3000-residue chain takes about 1 ms per step on a desktop CPU.
+
 **Limits:** this is a teaching-grade coarse-grained model, not a structure predictor. Proteins collapse, form helices and strands, and make and break disulfides with the right trends, but they won't reliably reach their true native fold. Atom-level simulation of folding needs supercomputers.
 
 ## Proteins
 
-| Protein | Residues | Why it's interesting |
-| --- | --- | --- |
-| BPTI | 58 | Three native disulfides (5–55, 14–38, 30–51); the classic disulfide folding study |
-| Villin headpiece HP35 | 35 | A fast-folding three-helix bundle |
-| Trp-cage TC5b | 20 | A designed miniprotein |
-| GB1 hairpin | 16 | A β-hairpin that folds on its own |
-| Amyloid-β 1–42 | 42 | The Alzheimer's peptide, mostly disordered |
-| Ubiquitin | 76 | Mixed helix and sheet |
+The app has these presets. Natural sequences are checked against UniProt.
+
+| Group | Proteins |
+| --- | --- |
+| Small and fast | Chignolin, Trp-cage, GB1 hairpin, villin headpiece HP35 |
+| Hormones and peptides | Oxytocin, melittin, glucagon, GLP-1 |
+| Disulfide-bonded | Insulin (A + B chains), BPTI, hen lysozyme |
+| Classic folds | Amyloid-β 1–42, ubiquitin, myoglobin, GFP |
+| Interactions (several chains) | GCN4 leucine-zipper dimer, hemoglobin α₂β₂ (574 residues), sickle hemoglobin (β Glu6Val), amyloid-β ×6, amyloid-β ×24 (1008 residues) |
+
+**Your own proteins:** tap **Create a protein…**. Paste one-letter codes or FASTA, and use `/` or separate FASTA records for multiple chains. You can also add up to 24 copies to watch them interact. The limit is 3000 residues in total.
+
+**Random proteins:** choose **Random protein** for a new sequence each time the screen turns on. Lengths run from 20 to 3000 residues. Styles:
+- natural amino-acid composition
+- designed helix bundle
+- designed α/β mix
+
+Big proteins run slower. The readout shows the step rate for anything over 300 residues.
+
+The web version (`index.html`) has the original six proteins and doesn't have these new features.
 
 ## On screen
 

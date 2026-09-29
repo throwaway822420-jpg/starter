@@ -1,7 +1,12 @@
 package com.hydrophobiccollapse
 
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.SharedPreferences
 import android.graphics.Canvas
+import android.os.Build
 import android.os.PowerManager
 import android.service.wallpaper.WallpaperService
 import android.view.Choreographer
@@ -17,6 +22,12 @@ class FoldingWallpaperService : WallpaperService() {
         private var visible = false
         private var hasSurface = false
         private var lastNs = 0L
+        // Random mode: a new protein every time the screen turns on
+        private val screenOn = object : BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) {
+                if (intent.action == Intent.ACTION_SCREEN_ON) sim.onScreenOn()
+            }
+        }
 
         override fun onCreate(surfaceHolder: SurfaceHolder) {
             super.onCreate(surfaceHolder)
@@ -24,10 +35,14 @@ class FoldingWallpaperService : WallpaperService() {
             setOffsetNotificationsEnabled(true)
             sim.applySettings(Settings.load(prefs))
             prefs.registerOnSharedPreferenceChangeListener(this)
+            val filter = IntentFilter(Intent.ACTION_SCREEN_ON)
+            if (Build.VERSION.SDK_INT >= 33) registerReceiver(screenOn, filter, Context.RECEIVER_NOT_EXPORTED)
+            else registerReceiver(screenOn, filter)
         }
 
         override fun onDestroy() {
             prefs.unregisterOnSharedPreferenceChangeListener(this)
+            try { unregisterReceiver(screenOn) } catch (e: IllegalArgumentException) { }
             stop()
             super.onDestroy()
         }

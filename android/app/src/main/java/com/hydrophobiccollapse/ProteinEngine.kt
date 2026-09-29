@@ -6,14 +6,16 @@ import kotlin.math.acos
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.exp
+import kotlin.math.floor
 import kotlin.math.ln
 import kotlin.math.min
 import kotlin.math.pow
 import kotlin.math.sign
 import kotlin.math.sqrt
 
-// Residue-level protein physics: one bead per amino acid (its Cα atom).
-// Units: Å, kcal/mol, K. A line-for-line port of the engine in index.html.
+// Residue-level protein physics: one bead per amino acid (its Cα atom), any number of chains.
+// Units: Å, kcal/mol, K. Non-bonded pairs come from Verlet neighbour lists built on a cell grid,
+// so the cost grows roughly linearly with the number of residues.
 
 private const val KB = 0.0019872      // kcal/(mol·K)
 private const val COULOMB = 332.06    // kcal·Å/(mol·e²)
@@ -49,28 +51,26 @@ private const val SIG_I3 = 4.2
 private const val K_SS = 20.0
 private const val R_SS = 5.5
 private const val SS_REACT = 6.5
-private const val SS_MIN_SEP = 6
+private const val SS_MIN_SEP = 5          // shorter disulfide loops within one chain are too strained
 private const val FMAX = 200.0
 private const val MC_EVERY = 25
+private const val ECUT_MAX = 18.0         // screened electrostatics are negligible beyond this
+private const val SKIN = 2.5              // neighbour-list margin, Å
 
-// radius (Å), Kyte–Doolittle hydropathy, Chou–Fasman helix and strand propensity
-private val AA: Map<Char, DoubleArray> = mapOf(
-    'A' to doubleArrayOf(2.5, 1.8, 1.42, 0.83), 'R' to doubleArrayOf(3.2, -4.5, 0.98, 0.93),
-    'N' to doubleArrayOf(2.7, -3.5, 0.67, 0.89), 'D' to doubleArrayOf(2.7, -3.5, 1.01, 0.54),
-    'C' to doubleArrayOf(2.6, 2.5, 0.70, 1.19), 'Q' to doubleArrayOf(2.9, -3.5, 1.11, 1.10),
-    'E' to doubleArrayOf(2.9, -3.5, 1.51, 0.37), 'G' to doubleArrayOf(2.2, -0.4, 0.57, 0.75),
-    'H' to doubleArrayOf(3.0, -3.2, 1.00, 0.87), 'I' to doubleArrayOf(3.0, 4.5, 1.08, 1.60),
-    'L' to doubleArrayOf(3.0, 3.8, 1.21, 1.30), 'K' to doubleArrayOf(3.1, -3.9, 1.16, 0.74),
-    'M' to doubleArrayOf(3.0, 1.9, 1.45, 1.05), 'F' to doubleArrayOf(3.2, 2.8, 1.13, 1.38),
-    'P' to doubleArrayOf(2.7, -1.6, 0.57, 0.55), 'S' to doubleArrayOf(2.5, -0.8, 0.77, 0.75),
-    'T' to doubleArrayOf(2.7, -0.7, 0.83, 1.19), 'W' to doubleArrayOf(3.5, -0.9, 1.08, 1.37),
-    'Y' to doubleArrayOf(3.3, -1.3, 0.69, 1.47), 'V' to doubleArrayOf(2.8, 4.2, 1.06, 1.70),
-)
-private val THREE = mapOf(
-    'A' to "Ala", 'R' to "Arg", 'N' to "Asn", 'D' to "Asp", 'C' to "Cys", 'Q' to "Gln", 'E' to "Glu",
-    'G' to "Gly", 'H' to "His", 'I' to "Ile", 'L' to "Leu", 'K' to "Lys", 'M' to "Met", 'F' to "Phe",
-    'P' to "Pro", 'S' to "Ser", 'T' to "Thr", 'W' to "Trp", 'Y' to "Tyr", 'V' to "Val",
-)
+const val AMINO_ACIDS = "ARNDCQEGHILKMFPSTWYV"
+private const val MAX_SIG = 0.9 * 2 * 3.5
+
+// Per amino acid, in AMINO_ACIDS order: radius (Å), Kyte–Doolittle hydropathy,
+// Chou–Fasman helix and strand propensity
+private val RAD = doubleArrayOf(2.5, 3.2, 2.7, 2.7, 2.6, 2.9, 2.9, 2.2, 3.0, 3.0, 3.0, 3.1, 3.0, 3.2, 2.7, 2.5, 2.7, 3.5, 3.3, 2.8)
+private val HYD = doubleArrayOf(1.8, -4.5, -3.5, -3.5, 2.5, -3.5, -3.5, -0.4, -3.2, 4.5, 3.8, -3.9, 1.9, 2.8, -1.6, -0.8, -0.7, -0.9, -1.3, 4.2)
+private val P_HELIX = doubleArrayOf(1.42, 0.98, 0.67, 1.01, 0.70, 1.11, 1.51, 0.57, 1.00, 1.08, 1.21, 1.16, 1.45, 1.13, 0.57, 0.77, 0.83, 1.08, 0.69, 1.06)
+private val P_STRAND = doubleArrayOf(0.83, 0.93, 0.89, 0.54, 1.19, 1.10, 0.37, 0.75, 0.87, 1.60, 1.30, 0.74, 1.05, 1.38, 0.55, 0.75, 1.19, 1.37, 1.47, 1.70)
+private val THREE = arrayOf("Ala", "Arg", "Asn", "Asp", "Cys", "Gln", "Glu", "Gly", "His", "Ile", "Leu", "Lys", "Met", "Phe", "Pro", "Ser", "Thr", "Trp", "Tyr", "Val")
+private val EPS20 = DoubleArray(400).also { t ->
+    fun hp01(h: Double) = (h + 4.5) / 9
+    for (a in 0 until 20) for (b in 0 until 20) t[a * 20 + b] = EPS_MIN + EPS_SCALE * hp01(HYD[a]) * hp01(HYD[b])
+}
 // Model-compound pKa values. Acids go 0 → −1 on deprotonation, bases go +1 → 0.
 private class SiteType(val pKa: Double, val acid: Boolean)
 private val SITE_TYPES = mapOf(
@@ -79,7 +79,6 @@ private val SITE_TYPES = mapOf(
     'R' to SiteType(12.5, false),
 )
 
-private fun hp01(h: Double) = (h + 4.5) / 9
 private fun clamp(v: Double, a: Double, b: Double) = if (v < a) a else if (v > b) b else v
 private fun propWeight(p: Double) = clamp(0.3 + (p - 1) * 2, 0.05, 1.3)
 private fun wrap(a0: Double): Double {
@@ -95,14 +94,32 @@ class Flash(val res: Int, val t: Double, val kind: Int) {
     companion object { const val LOST = 0; const val GAINED = 1; const val SS = 2 }
 }
 
+/** A growable list of residue pairs. */
+class PairList {
+    var a = IntArray(256); private set
+    var b = IntArray(256); private set
+    var size = 0; private set
+    fun clear() { size = 0 }
+    fun add(i: Int, j: Int) {
+        if (size == a.size) { a = a.copyOf(size * 2); b = b.copyOf(size * 2) }
+        a[size] = i; b[size] = j; size++
+    }
+}
+
 class ProteinEngine {
     var temperature = 300.0
     var pH = 7.0
     var saltMM = 150.0
     var redox = 0.4
 
+    /** Tests switch this off to check the neighbour lists against every pair. */
+    var useNeighbourLists = true
+
     var n = 0; private set
     var seq = ""; private set
+    var nChains = 0; private set
+    var chainOf = IntArray(0); private set
+    var chainStart = IntArray(0); private set
     var native: List<IntArray> = emptyList(); private set
     var x = DoubleArray(0); private set
     var y = DoubleArray(0); private set
@@ -110,20 +127,28 @@ class ProteinEngine {
     var charge = DoubleArray(0); private set
     var partner = IntArray(0); private set
     var ss = IntArray(0); private set            // 0 coil, 1 helix, 2 strand
-    var contact = BooleanArray(0); private set
+    var type = IntArray(0); private set
 
     private var vx = DoubleArray(0); private var vy = DoubleArray(0); private var vz = DoubleArray(0)
     private var fx = DoubleArray(0); private var fy = DoubleArray(0); private var fz = DoubleArray(0)
     private var rad = DoubleArray(0)
-    private var sig = DoubleArray(0); private var eps = DoubleArray(0)
     private var wAngH = DoubleArray(0); private var wAngS = DoubleArray(0)
     private var wDihH = DoubleArray(0); private var wDihS = DoubleArray(0); private var wHB = DoubleArray(0)
     private val sites = ArrayList<Site>()
     private var cysSite = arrayOfNulls<Site>(0)
     private var cys = IntArray(0)
+    private var titratable = IntArray(0)
     private var charged = IntArray(0); private var nCharged = 0
     private var rBox = 40.0
     private var stepCount = 0L
+
+    // Neighbour lists
+    private val shortPairs = PairList()
+    private val elecPairs = PairList()
+    private var x0 = DoubleArray(0); private var y0 = DoubleArray(0); private var z0 = DoubleArray(0)
+    private var listsValid = false
+    private var cellHead = IntArray(0)
+    private var cellNext = IntArray(0)
 
     val events = ArrayDeque<ChemEvent>()
     val flashes = ArrayList<Flash>()
@@ -139,7 +164,9 @@ class ProteinEngine {
     var helix = 0.0; private set
     var strand = 0.0; private set
     var netCharge = 0; private set
-    var contacts = 0; private set
+    val contacts = PairList()                  // residue pairs in contact (|i−j| ≥ 3 or different chains)
+    var interfaceContacts = 0; private set     // contacts between different chains
+    var largestComplex = 1; private set        // chains in the biggest group held together by contacts or disulfides
     val bridges = ArrayList<IntArray>()
     val disulfides = ArrayList<IntArray>()     // [i, j, native ? 1 : 0]
 
@@ -149,55 +176,70 @@ class ProteinEngine {
         seed = seed xor (seed ushr 12); seed = seed xor (seed shl 25); seed = seed xor (seed ushr 27)
         return ((seed * 2685821657736338717L) ushr 11).toDouble() / (1L shl 53).toDouble()
     }
-    private fun gauss(): Double {
-        var u = rand()
-        while (u == 0.0) u = rand()
-        return sqrt(-2 * ln(u)) * cos(2 * PI * rand())
-    }
 
     fun radius(i: Int) = rad[i]
     fun debye() = 3.04 / sqrt(maxOf(saltMM, 1.0) / 1000)
+    fun sameChain(i: Int, j: Int) = chainOf[i] == chainOf[j]
+    fun chainLetter(c: Int): Char = if (c < 26) 'A' + c else 'a' + (c - 26) % 26
+    /** "Cys14", or "Cys B7" when there are several chains. */
+    fun residueLabel(i: Int): String {
+        val three = THREE[type[i]]
+        return if (nChains <= 1) "$three${i + 1}" else "$three ${chainLetter(chainOf[i])}${i - chainStart[chainOf[i]] + 1}"
+    }
 
     fun load(protein: Protein) {
-        seq = protein.seq; n = seq.length; native = protein.native
+        val chains = protein.chains
+        seq = chains.joinToString(""); n = seq.length; native = protein.native
+        nChains = chains.size
+        chainStart = IntArray(nChains + 1)
+        for (c in chains.indices) chainStart[c + 1] = chainStart[c] + chains[c].length
+        chainOf = IntArray(n)
+        for (c in chains.indices) for (i in chainStart[c] until chainStart[c + 1]) chainOf[i] = c
         val n = n
+        type = IntArray(n) { AMINO_ACIDS.indexOf(seq[it]).coerceAtLeast(0) }
         x = DoubleArray(n); y = DoubleArray(n); z = DoubleArray(n)
         vx = DoubleArray(n); vy = DoubleArray(n); vz = DoubleArray(n)
         fx = DoubleArray(n); fy = DoubleArray(n); fz = DoubleArray(n)
-        rad = DoubleArray(n) { AA.getValue(seq[it])[0] }
+        x0 = DoubleArray(n); y0 = DoubleArray(n); z0 = DoubleArray(n)
+        cellNext = IntArray(n)
+        rad = DoubleArray(n) { RAD[type[it]] }
         charge = DoubleArray(n)
         partner = IntArray(n) { -1 }
         ss = IntArray(n)
-        contact = BooleanArray(n * n)
-        sig = DoubleArray(n * n); eps = DoubleArray(n * n)
-        for (i in 0 until n) for (j in 0 until n) {
-            sig[i * n + j] = 0.9 * (rad[i] + rad[j])
-            eps[i * n + j] = EPS_MIN + EPS_SCALE * hp01(AA.getValue(seq[i])[1]) * hp01(AA.getValue(seq[j])[1])
+        // Local-structure weights; windows never span two chains
+        fun avg(i: Int, len: Int, table: DoubleArray): Double {
+            var s = 0.0; for (m in 0 until len) s += table[type[i + m]]; return s / len
         }
-        fun avg(i: Int, len: Int, k: Int): Double { var s = 0.0; for (m in 0 until len) s += AA.getValue(seq[i + m])[k]; return s / len }
+        fun window(i: Int, len: Int) = i + len - 1 < n && chainOf[i] == chainOf[i + len - 1]
         wAngH = DoubleArray(n); wAngS = DoubleArray(n); wDihH = DoubleArray(n); wDihS = DoubleArray(n); wHB = DoubleArray(n)
-        for (i in 0 until n - 2) { wAngH[i] = propWeight(avg(i, 3, 2)); wAngS[i] = propWeight(avg(i, 3, 3)) }
-        for (i in 0 until n - 3) { wDihH[i] = propWeight(avg(i, 4, 2)); wDihS[i] = propWeight(avg(i, 4, 3)) }
-        for (i in 0 until n - 4) wHB[i] = propWeight(avg(i, 5, 2))
+        for (i in 0 until n) {
+            if (window(i, 3)) { wAngH[i] = propWeight(avg(i, 3, P_HELIX)); wAngS[i] = propWeight(avg(i, 3, P_STRAND)) }
+            if (window(i, 4)) { wDihH[i] = propWeight(avg(i, 4, P_HELIX)); wDihS[i] = propWeight(avg(i, 4, P_STRAND)) }
+            if (window(i, 5)) wHB[i] = propWeight(avg(i, 5, P_HELIX))
+        }
         // Proline cannot donate a backbone hydrogen bond and breaks helices
         for (i in 0 until n) if (seq[i] == 'P') {
             for (k in maxOf(0, i - 4)..i) wHB[k] *= 0.2
             for (k in maxOf(0, i - 3)..i) wDihH[k] *= 0.4
         }
-        // Titratable sites, including the chain termini
+        // Titratable sites, including every chain's termini
         sites.clear()
         cysSite = arrayOfNulls(n)
-        sites.add(Site(0, 8.0, false, true, true, false))
-        for (i in 0 until n) SITE_TYPES[seq[i]]?.let { t ->
-            val s = Site(i, t.pKa, t.acid, true, true, seq[i] == 'C')
-            sites.add(s)
-            if (s.isCys) cysSite[i] = s
+        for (c in 0 until nChains) {
+            val s0 = chainStart[c]; val s1 = chainStart[c + 1] - 1
+            sites.add(Site(s0, 8.0, false, true, true, false))
+            for (i in s0..s1) SITE_TYPES[seq[i]]?.let { t ->
+                val s = Site(i, t.pKa, t.acid, true, true, seq[i] == 'C')
+                sites.add(s)
+                if (s.isCys) cysSite[i] = s
+            }
+            sites.add(Site(s1, 3.1, true, true, true, false))
         }
-        sites.add(Site(n - 1, 3.1, true, true, true, false))
         for (s in sites) s.prot = rand() < 1 / (1 + 10.0.pow(pH - s.pKa))
         cys = (0 until n).filter { seq[it] == 'C' }.toIntArray()
+        titratable = sites.map { it.res }.distinct().sorted().toIntArray()
         charged = IntArray(n)
-        rBox = 5 * sqrt(n.toDouble()) + 10
+        rBox = 5 * sqrt(n.toDouble()) + 10 + 8 * sqrt(nChains.toDouble())
         events.clear(); flashes.clear(); time = 0.0; stepCount = 0
         grab = -1
         unfoldCoords()
@@ -205,18 +247,35 @@ class ProteinEngine {
         measure()
     }
 
-    // Extended random coil with sensible bond angles
+    // Each chain an extended random coil, chains spread apart on a grid
     private fun unfoldCoords() {
-        var dx = 1.0; var dy = 0.0; var dz = 0.0
-        x[0] = 0.0; y[0] = 0.0; z[0] = 0.0
-        for (i in 1 until n) {
-            var nx: Double; var ny: Double; var nz: Double; var len: Double
-            do {
-                nx = dx + (rand() - 0.5) * 1.3; ny = dy + (rand() - 0.5) * 1.3; nz = dz + (rand() - 0.5) * 1.3
-                len = sqrt(nx * nx + ny * ny + nz * nz)
-            } while (len < 0.3)
-            dx = nx / len; dy = ny / len; dz = nz / len
-            x[i] = x[i - 1] + R_BOND * dx; y[i] = y[i - 1] + R_BOND * dy; z[i] = z[i - 1] + R_BOND * dz
+        val side = Math.ceil(Math.cbrt(nChains.toDouble())).toInt()
+        // Chains start about two coil-widths apart: separate, but close enough to find each other
+        var longest = 1
+        for (c in 0 until nChains) longest = maxOf(longest, chainStart[c + 1] - chainStart[c])
+        val spacing = if (nChains > 1) 3.0 * sqrt(longest.toDouble()) + 12 else 0.0
+        for (c in 0 until nChains) {
+            val gx = (c % side) - (side - 1) / 2.0
+            val gy = ((c / side) % side) - (side - 1) / 2.0
+            val gz = (c / (side * side)) - (side - 1) / 2.0
+            val ox = gx * spacing; val oy = gy * spacing; val oz = gz * spacing
+            val s0 = chainStart[c]; val s1 = chainStart[c + 1]
+            var dx = 1.0; var dy = 0.0; var dz = 0.0
+            x[s0] = ox; y[s0] = oy; z[s0] = oz
+            val keep = 0.75 * rBox
+            for (i in s0 + 1 until s1) {
+                var nx: Double; var ny: Double; var nz: Double; var len: Double
+                do {
+                    nx = dx + (rand() - 0.5) * 1.3; ny = dy + (rand() - 0.5) * 1.3; nz = dz + (rand() - 0.5) * 1.3
+                    // Turn back toward the chain's own start when wandering too far (long chains)
+                    val rx = x[i - 1] - ox; val ry = y[i - 1] - oy; val rz = z[i - 1] - oz
+                    val r = sqrt(rx * rx + ry * ry + rz * rz)
+                    if (r > (if (nChains > 1) 0.5 * spacing else keep)) { nx -= 0.6 * rx / r; ny -= 0.6 * ry / r; nz -= 0.6 * rz / r }
+                    len = sqrt(nx * nx + ny * ny + nz * nz)
+                } while (len < 0.3)
+                dx = nx / len; dy = ny / len; dz = nz / len
+                x[i] = x[i - 1] + R_BOND * dx; y[i] = y[i - 1] + R_BOND * dy; z[i] = z[i - 1] + R_BOND * dz
+            }
         }
         var cx = 0.0; var cy = 0.0; var cz = 0.0
         for (i in 0 until n) { cx += x[i]; cy += y[i]; cz += z[i] }
@@ -225,6 +284,7 @@ class ProteinEngine {
         vx.fill(0.0); vy.fill(0.0); vz.fill(0.0)
         partner.fill(-1)
         for (s in sites) s.active = true
+        listsValid = false
     }
 
     private fun siteCharge(s: Site): Double =
@@ -237,15 +297,95 @@ class ProteinEngine {
         for (i in 0 until n) if (charge[i] != 0.0) charged[nCharged++] = i
     }
 
-    // ---- Forces. With measure = true also returns the potential energy. ----
+    // ---------- Neighbour lists ----------
+    private fun excludedShort(i: Int, j: Int) = chainOf[i] == chainOf[j] && j - i < 3
+    private fun excludedElec(i: Int, j: Int) = chainOf[i] == chainOf[j] && j - i < 2
+
+    /** All pairs (i < j) among [idx] closer than [cutoff], using a cell grid, passed to [accept]. */
+    private inline fun gridPairs(idx: IntArray, count: Int, cutoff: Double, accept: (Int, Int, Double) -> Unit) {
+        if (count == 0) return
+        var mnx = Double.MAX_VALUE; var mny = Double.MAX_VALUE; var mnz = Double.MAX_VALUE
+        var mxx = -Double.MAX_VALUE; var mxy = -Double.MAX_VALUE; var mxz = -Double.MAX_VALUE
+        for (k in 0 until count) {
+            val i = idx[k]
+            if (x[i] < mnx) mnx = x[i]; if (x[i] > mxx) mxx = x[i]
+            if (y[i] < mny) mny = y[i]; if (y[i] > mxy) mxy = y[i]
+            if (z[i] < mnz) mnz = z[i]; if (z[i] > mxz) mxz = z[i]
+        }
+        var cell = cutoff
+        var nx = floor((mxx - mnx) / cell).toInt() + 1
+        var ny = floor((mxy - mny) / cell).toInt() + 1
+        var nz = floor((mxz - mnz) / cell).toInt() + 1
+        while (nx.toLong() * ny * nz > 400_000) { // runaway coordinates: coarser cells, still correct
+            cell *= 2
+            nx = floor((mxx - mnx) / cell).toInt() + 1; ny = floor((mxy - mny) / cell).toInt() + 1; nz = floor((mxz - mnz) / cell).toInt() + 1
+        }
+        val reach = Math.ceil(cutoff / cell).toInt()
+        val ncell = nx * ny * nz
+        if (cellHead.size < ncell) cellHead = IntArray(ncell)
+        cellHead.fill(-1, 0, ncell)
+        for (k in 0 until count) {
+            val i = idx[k]
+            val c = (((floor((x[i] - mnx) / cell).toInt()) * ny + floor((y[i] - mny) / cell).toInt()) * nz) + floor((z[i] - mnz) / cell).toInt()
+            cellNext[i] = cellHead[c]; cellHead[c] = i
+        }
+        val cut2 = cutoff * cutoff
+        for (k in 0 until count) {
+            val i = idx[k]
+            val ci = floor((x[i] - mnx) / cell).toInt(); val cj = floor((y[i] - mny) / cell).toInt(); val ck = floor((z[i] - mnz) / cell).toInt()
+            for (a in maxOf(0, ci - reach)..minOf(nx - 1, ci + reach))
+                for (b in maxOf(0, cj - reach)..minOf(ny - 1, cj + reach))
+                    for (cc in maxOf(0, ck - reach)..minOf(nz - 1, ck + reach)) {
+                        var j = cellHead[(a * ny + b) * nz + cc]
+                        while (j >= 0) {
+                            if (j > i) {
+                                val dx = x[i] - x[j]; val dy = y[i] - y[j]; val dz = z[i] - z[j]
+                                val r2 = dx * dx + dy * dy + dz * dz
+                                if (r2 < cut2) accept(i, j, r2)
+                            }
+                            j = cellNext[j]
+                        }
+                    }
+        }
+    }
+
+    private val allIdx get() = IntArray(n) { it }
+    private fun rebuildLists() {
+        shortPairs.clear(); elecPairs.clear()
+        if (!useNeighbourLists) {
+            for (i in 0 until n) for (j in i + 1 until n) if (!excludedShort(i, j)) shortPairs.add(i, j)
+            for (a in titratable.indices) for (b in a + 1 until titratable.size) {
+                val i = titratable[a]; val j = titratable[b]
+                if (!excludedElec(i, j)) elecPairs.add(i, j)
+            }
+        } else {
+            val all = allIdx
+            gridPairs(all, n, LJ_CUT * MAX_SIG + SKIN) { i, j, _ -> if (!excludedShort(i, j)) shortPairs.add(i, j) }
+            gridPairs(titratable, titratable.size, ECUT_MAX + SKIN) { i, j, _ -> if (!excludedElec(i, j)) elecPairs.add(i, j) }
+        }
+        System.arraycopy(x, 0, x0, 0, n); System.arraycopy(y, 0, y0, 0, n); System.arraycopy(z, 0, z0, 0, n)
+        listsValid = true
+    }
+    private fun checkLists() {
+        if (!listsValid || !useNeighbourLists) { rebuildLists(); return }
+        val lim = (SKIN / 2) * (SKIN / 2)
+        for (i in 0 until n) {
+            val dx = x[i] - x0[i]; val dy = y[i] - y0[i]; val dz = z[i] - z0[i]
+            if (dx * dx + dy * dy + dz * dz > lim) { rebuildLists(); return }
+        }
+    }
+
+    // ---------- Forces. With measure = true also returns the potential energy. ----------
     fun forces(measure: Boolean): Double {
+        checkLists()
         val n = n; val x = x; val y = y; val z = z
         fx.fill(0.0); fy.fill(0.0); fz.fill(0.0)
         var eBond = 0.0; var eLocal = 0.0; var eContact = 0.0; var eElec = 0.0
-        if (measure) contact.fill(false)
+        if (measure) contacts.clear()
 
-        // Bonds
+        // Bonds (within a chain)
         for (i in 0 until n - 1) {
+            if (chainOf[i] != chainOf[i + 1]) continue
             val dx = x[i + 1] - x[i]; val dy = y[i + 1] - y[i]; val dz = z[i + 1] - z[i]
             val r = sqrt(dx * dx + dy * dy + dz * dz).coerceAtLeast(1e-6)
             var f = K_BOND * (r - R_BOND) / r
@@ -257,6 +397,7 @@ class ProteinEngine {
 
         // Virtual bond angles: walls plus helix (91°) and strand (120°) wells
         for (i in 0 until n - 2) {
+            if (chainOf[i] != chainOf[i + 2]) continue
             val j = i + 1; val k = i + 2
             val ax = x[i] - x[j]; val ay = y[i] - y[j]; val az = z[i] - z[j]
             val bx = x[k] - x[j]; val by = y[k] - y[j]; val bz = z[k] - z[j]
@@ -283,6 +424,7 @@ class ProteinEngine {
 
         // Virtual dihedrals: right-handed helix (+50°) and extended strand (−170°) wells
         for (i in 0 until n - 3) {
+            if (chainOf[i] != chainOf[i + 3]) continue
             val i1 = i + 1; val i2 = i + 2; val i3 = i + 3
             val b1x = x[i1] - x[i]; val b1y = y[i1] - y[i]; val b1z = z[i1] - z[i]
             val b2x = x[i2] - x[i1]; val b2y = y[i2] - y[i1]; val b2z = z[i2] - z[i1]
@@ -314,6 +456,7 @@ class ProteinEngine {
 
         // Helical i→i+4 hydrogen bond
         for (i in 0 until n - 4) {
+            if (wHB[i] == 0.0) continue
             val j = i + 4
             val dx = x[i] - x[j]; val dy = y[i] - y[j]; val dz = z[i] - z[j]
             val r = sqrt(dx * dx + dy * dy + dz * dz).coerceAtLeast(1e-6)
@@ -326,53 +469,51 @@ class ProteinEngine {
             if (measure) eLocal -= g
         }
 
-        // Contacts: residue-specific Lennard-Jones (minimum at σ, depth ε)
+        // Contacts: residue-specific Lennard-Jones (minimum at σ, depth ε). Chains interact exactly as residues within one chain do.
         val sc = 1 / LJ_CUT.pow(6)
-        for (i in 0 until n - 3) {
-            val xi = x[i]; val yi = y[i]; val zi = z[i]
-            for (j in i + 3 until n) {
-                val dx = xi - x[j]; val dy = yi - y[j]; val dz = zi - z[j]
-                var r2 = dx * dx + dy * dy + dz * dz
-                val s: Double; val ep: Double; val cut2: Double; val attractive: Boolean
-                if (j == i + 3) { s = SIG_I3; ep = 0.5; attractive = false; cut2 = s * s }
-                else { s = sig[i * n + j]; ep = eps[i * n + j]; attractive = true; cut2 = (LJ_CUT * s) * (LJ_CUT * s) }
-                if (r2 >= cut2) continue
-                if (r2 < 1) r2 = 1.0
-                val s2 = s * s / r2; val s6 = s2 * s2 * s2
-                var f = 12 * ep * (s6 * s6 - s6) / r2
-                val r = sqrt(r2)
-                if (abs(f * r) > FMAX) f = sign(f) * FMAX / r
-                fx[i] += f * dx; fy[i] += f * dy; fz[i] += f * dz
-                fx[j] -= f * dx; fy[j] -= f * dy; fz[j] -= f * dz
-                if (measure) {
-                    if (attractive) {
-                        eContact += ep * (s6 * s6 - 2 * s6) - ep * (sc * sc - 2 * sc)
-                        if (r2 < (1.25 * s) * (1.25 * s)) contact[i * n + j] = true
-                    } else {
-                        eContact += ep * (s6 * s6 - 2 * s6 + 1)
-                    }
+        val sa = shortPairs.a; val sb = shortPairs.b
+        for (p in 0 until shortPairs.size) {
+            val i = sa[p]; val j = sb[p]
+            val dx = x[i] - x[j]; val dy = y[i] - y[j]; val dz = z[i] - z[j]
+            var r2 = dx * dx + dy * dy + dz * dz
+            val s: Double; val ep: Double; val cut2: Double; val attractive: Boolean
+            if (j == i + 3 && chainOf[i] == chainOf[j]) { s = SIG_I3; ep = 0.5; attractive = false; cut2 = s * s }
+            else { s = 0.9 * (rad[i] + rad[j]); ep = EPS20[type[i] * 20 + type[j]]; attractive = true; cut2 = (LJ_CUT * s) * (LJ_CUT * s) }
+            if (r2 >= cut2) continue
+            if (r2 < 1) r2 = 1.0
+            val s2 = s * s / r2; val s6 = s2 * s2 * s2
+            var f = 12 * ep * (s6 * s6 - s6) / r2
+            val r = sqrt(r2)
+            if (abs(f * r) > FMAX) f = sign(f) * FMAX / r
+            fx[i] += f * dx; fy[i] += f * dy; fz[i] += f * dz
+            fx[j] -= f * dx; fy[j] -= f * dy; fz[j] -= f * dz
+            if (measure) {
+                if (attractive) {
+                    eContact += ep * (s6 * s6 - 2 * s6) - ep * (sc * sc - 2 * sc)
+                    if (r2 < (1.25 * s) * (1.25 * s)) contacts.add(i, j)
+                } else {
+                    eContact += ep * (s6 * s6 - 2 * s6 + 1)
                 }
             }
         }
 
         // Screened electrostatics (Debye–Hückel) between charged residues
-        val lam = debye(); val ecut = min(3 * lam, 30.0); val ecut2 = ecut * ecut
-        for (a in 0 until nCharged) {
-            val i = charged[a]; val qi = charge[i]
-            for (b in a + 1 until nCharged) {
-                val j = charged[b]
-                if (j - i < 2) continue
-                val dx = x[i] - x[j]; val dy = y[i] - y[j]; val dz = z[i] - z[j]
-                var r2 = dx * dx + dy * dy + dz * dz
-                if (r2 > ecut2) continue
-                if (r2 < 9) r2 = 9.0
-                val r = sqrt(r2)
-                val u = COULOMB * qi * charge[j] * exp(-r / lam) / (EPS_WATER * r)
-                val f = u * (1 / r + 1 / lam) / r
-                fx[i] += f * dx; fy[i] += f * dy; fz[i] += f * dz
-                fx[j] -= f * dx; fy[j] -= f * dy; fz[j] -= f * dz
-                if (measure) eElec += u
-            }
+        val lam = debye(); val ecut = min(3 * lam, ECUT_MAX); val ecut2 = ecut * ecut
+        val ea = elecPairs.a; val eb = elecPairs.b
+        for (p in 0 until elecPairs.size) {
+            val i = ea[p]; val j = eb[p]
+            val qq = charge[i] * charge[j]
+            if (qq == 0.0) continue
+            val dx = x[i] - x[j]; val dy = y[i] - y[j]; val dz = z[i] - z[j]
+            var r2 = dx * dx + dy * dy + dz * dz
+            if (r2 > ecut2) continue
+            if (r2 < 9) r2 = 9.0
+            val r = sqrt(r2)
+            val u = COULOMB * qq * exp(-r / lam) / (EPS_WATER * r)
+            val f = u * (1 / r + 1 / lam) / r
+            fx[i] += f * dx; fy[i] += f * dy; fz[i] += f * dz
+            fx[j] -= f * dx; fy[j] -= f * dy; fz[j] -= f * dz
+            if (measure) eElec += u
         }
 
         // Disulfide bonds
@@ -426,14 +567,17 @@ class ProteinEngine {
     /** For tests: form a disulfide directly. */
     fun forceDisulfide(i: Int, j: Int) { bond(i, j) }
 
-    // ---- Chemistry: constant-pH titration and thiol–disulfide reactions (Monte Carlo) ----
+    // ---------- Chemistry: constant-pH titration and thiol–disulfide reactions (Monte Carlo) ----------
     private fun elecAt(i: Int, dq: Double): Double {
-        val lam = debye()
+        val lam = debye(); val ecut = min(3 * lam, ECUT_MAX)
         var s = 0.0
         for (a in 0 until nCharged) {
             val j = charged[a]
-            if (j == i || abs(j - i) < 2) continue
-            val r = maxOf(3.0, dist(i, j))
+            if (j == i || (chainOf[i] == chainOf[j] && abs(j - i) < 2)) continue
+            val dx = x[i] - x[j]; val dy = y[i] - y[j]; val dz = z[i] - z[j]
+            val r2 = dx * dx + dy * dy + dz * dz
+            if (r2 > ecut * ecut) continue
+            val r = maxOf(3.0, sqrt(r2))
             s += charge[j] * exp(-r / lam) / r
         }
         return COULOMB * dq * s / EPS_WATER
@@ -444,6 +588,7 @@ class ProteinEngine {
     }
     private fun thiolate(i: Int): Boolean { val s = cysSite[i]; return s != null && s.active && !s.prot }
     private fun isNative(i: Int, j: Int) = native.any { (it[0] - 1 == i && it[1] - 1 == j) || (it[0] - 1 == j && it[1] - 1 == i) }
+    private fun loopOk(i: Int, j: Int) = chainOf[i] != chainOf[j] || abs(j - i) >= SS_MIN_SEP
     private fun log(text: String) {
         events.addFirst(ChemEvent(time, text))
         while (events.size > 20) events.removeLast()
@@ -457,6 +602,7 @@ class ProteinEngine {
         cysSite[i]?.let { it.active = true; it.prot = true }
         cysSite[j]?.let { it.active = true; it.prot = !jThiolate }
     }
+    private fun ssName(i: Int, j: Int) = "${residueLabel(minOf(i, j))}–${residueLabel(maxOf(i, j))}"
 
     private fun chemistry() {
         val kT = KB * temperature; val ln10 = ln(10.0)
@@ -470,7 +616,7 @@ class ProteinEngine {
             if (dG <= 0 || rand() < exp(-dG / kT)) {
                 s.prot = !s.prot
                 charge[s.res] += dq
-                flashes.add(Flash(s.res, time, if (toDeprot) Flash.LOST else Flash.GAINED))
+                if (flashes.size < 400) flashes.add(Flash(s.res, time, if (toDeprot) Flash.LOST else Flash.GAINED))
             }
         }
         // Disulfides: oxidation needs a thiolate; reduction by the redox buffer
@@ -481,18 +627,18 @@ class ProteinEngine {
                 val j = partner[i]
                 if (j > i && rand() < 0.0015 * red) {
                     unbond(i, j, false)
-                    log("Cys${i + 1}–Cys${j + 1} disulfide reduced")
+                    log("${ssName(i, j)} disulfide reduced")
                     flashes.add(Flash(i, time, Flash.SS)); flashes.add(Flash(j, time, Flash.SS))
                 }
                 continue
             }
             for (b in a + 1 until cys.size) {
                 val j = cys[b]
-                if (partner[j] >= 0 || j - i < SS_MIN_SEP) continue
+                if (partner[j] >= 0 || !loopOk(i, j)) continue
                 if (!(thiolate(i) || thiolate(j))) continue
                 if (dist(i, j) < SS_REACT && rand() < 0.05 * ox) {
                     bond(i, j)
-                    log("Cys${i + 1}–Cys${j + 1} disulfide formed${if (isNative(i, j)) " · native" else ""}")
+                    log("${ssName(i, j)} disulfide formed${if (isNative(i, j)) " · native" else ""}")
                     flashes.add(Flash(i, time, Flash.SS)); flashes.add(Flash(j, time, Flash.SS))
                     break
                 }
@@ -503,12 +649,11 @@ class ProteinEngine {
             if (partner[k] >= 0 || !thiolate(k)) continue
             for (i in cys) {
                 val j = partner[i]
-                if (j < 0 || i == k || j == k || abs(k - i) < SS_MIN_SEP) continue
+                if (j < 0 || i == k || j == k || !loopOk(k, i)) continue
                 if (dist(k, i) < SS_REACT && rand() < 0.008) {
                     unbond(i, j, true)
                     bond(k, i)
-                    val lo = min(k, i) + 1; val hi = maxOf(k, i) + 1
-                    log("Cys${k + 1} attacked Cys${i + 1}–Cys${j + 1} → Cys$lo–Cys$hi${if (isNative(k, i)) " · native" else ""}")
+                    log("${residueLabel(k)} attacked ${ssName(i, j)} → ${ssName(k, i)}${if (isNative(k, i)) " · native" else ""}")
                     flashes.add(Flash(k, time, Flash.SS)); flashes.add(Flash(j, time, Flash.SS))
                     break
                 }
@@ -519,15 +664,18 @@ class ProteinEngine {
         flashes.removeAll { it.t <= cutoff }
     }
 
-    // ---- Integration (Langevin dynamics) ----
+    // ---------- Integration (Langevin dynamics) ----------
     fun step(count: Int) {
         val c1 = exp(-GAMMA * DT); val c2 = sqrt((1 - c1 * c1) * KB * temperature)
+        // Thermal kicks: uniform noise with unit variance. Over many steps it acts like Gaussian noise
+        // (the usual shortcut in Langevin codes) and avoids three log/cos calls per residue per step.
+        val u = c2 * sqrt(12.0)
         repeat(count) {
             forces(false)
             for (i in 0 until n) {
-                vx[i] = (vx[i] + fx[i] * DT) * c1 + c2 * gauss()
-                vy[i] = (vy[i] + fy[i] * DT) * c1 + c2 * gauss()
-                vz[i] = (vz[i] + fz[i] * DT) * c1 + c2 * gauss()
+                vx[i] = (vx[i] + fx[i] * DT) * c1 + u * (rand() - 0.5)
+                vy[i] = (vy[i] + fy[i] * DT) * c1 + u * (rand() - 0.5)
+                vz[i] = (vz[i] + fz[i] * DT) * c1 + u * (rand() - 0.5)
                 x[i] += vx[i] * DT; y[i] += vy[i] * DT; z[i] += vz[i] * DT
             }
             stepCount++
@@ -536,41 +684,65 @@ class ProteinEngine {
     }
     fun advanceClock(dt: Double) { time += dt }
 
-    // ---- Observables ----
-    fun measure() {
-        forces(true)
+    /** Cheap per-frame update of the centre of mass (measure() does this too). */
+    fun updateCenter() {
         var cx = 0.0; var cy = 0.0; var cz = 0.0
         for (i in 0 until n) { cx += x[i]; cy += y[i]; cz += z[i] }
-        cx /= n; cy /= n; cz /= n
+        center[0] = cx / n; center[1] = cy / n; center[2] = cz / n
+    }
+
+    // ---------- Observables ----------
+    fun measure() {
+        forces(true)
+        updateCenter()
+        val cx = center[0]; val cy = center[1]; val cz = center[2]
         var s2 = 0.0
         for (i in 0 until n) { val dx = x[i] - cx; val dy = y[i] - cy; val dz = z[i] - cz; s2 += dx * dx + dy * dy + dz * dz }
         rg = sqrt(s2 / n)
-        center[0] = cx; center[1] = cy; center[2] = cz
-        // Secondary structure from Cα geometry: two consecutive helical (or extended) dihedrals
-        val angs = DoubleArray(n); val dihs = DoubleArray(n)
-        for (i in 0 until n - 2) angs[i] = angleAt(i)
-        for (i in 0 until n - 3) dihs[i] = dihedral(i)
+        // Secondary structure from Cα geometry: two consecutive helical (or extended) dihedrals, within one chain
         ss.fill(0)
+        val angs = DoubleArray(n) { Double.NaN }; val dihs = DoubleArray(n) { Double.NaN }
+        for (i in 0 until n - 2) if (chainOf[i] == chainOf[i + 2]) angs[i] = angleAt(i)
+        for (i in 0 until n - 3) if (chainOf[i] == chainOf[i + 3]) dihs[i] = dihedral(i)
         fun helical(i: Int) = abs(wrap(dihs[i] - PHI_HELIX)) < 35 * DEG && angs[i] < 105 * DEG && angs[i + 1] < 105 * DEG
         fun extended(i: Int) = abs(wrap(dihs[i] - PHI_STRAND)) < 45 * DEG && angs[i] > 105 * DEG && angs[i + 1] > 105 * DEG
-        for (i in 0 until n - 4) if (helical(i) && helical(i + 1)) for (k in i..i + 4) ss[k] = 1
-        for (i in 0 until n - 4) if (extended(i) && extended(i + 1)) for (k in i..i + 4) if (ss[k] == 0) ss[k] = 2
+        for (i in 0 until n - 4) {
+            if (chainOf[i] != chainOf[i + 4]) continue
+            if (helical(i) && helical(i + 1)) for (k in i..i + 4) ss[k] = 1
+        }
+        for (i in 0 until n - 4) {
+            if (chainOf[i] != chainOf[i + 4]) continue
+            if (extended(i) && extended(i + 1)) for (k in i..i + 4) if (ss[k] == 0) ss[k] = 2
+        }
         var h = 0; var st = 0
         for (i in 0 until n) { if (ss[i] == 1) h++ else if (ss[i] == 2) st++ }
         helix = h.toDouble() / n; strand = st.toDouble() / n
+        // Salt bridges from the electrostatics list
         bridges.clear()
-        for (a in 0 until nCharged) for (b in a + 1 until nCharged) {
-            val i = charged[a]; val j = charged[b]
-            if (j - i >= 3 && charge[i] * charge[j] < 0 && dist(i, j) < 7.5) bridges.add(intArrayOf(i, j))
+        for (p in 0 until elecPairs.size) {
+            val i = elecPairs.a[p]; val j = elecPairs.b[p]
+            if (charge[i] * charge[j] < 0 && (chainOf[i] != chainOf[j] || j - i >= 3) && dist(i, j) < 7.5) bridges.add(intArrayOf(i, j))
         }
         var q = 0.0
         for (i in 0 until n) q += charge[i]
         netCharge = Math.round(q).toInt()
-        var nc = 0
-        for (c in contact) if (c) nc++
-        contacts = nc
         disulfides.clear()
         for (i in 0 until n) if (partner[i] > i) disulfides.add(intArrayOf(i, partner[i], if (isNative(i, partner[i])) 1 else 0))
+        // Interfaces: contacts between chains, and the largest group of chains stuck together
+        interfaceContacts = 0
+        if (nChains > 1) {
+            val parent = IntArray(nChains) { it }
+            fun find(a: Int): Int { var r = a; while (parent[r] != r) r = parent[r]; return r }
+            fun union(a: Int, b: Int) { val ra = find(a); val rb = find(b); if (ra != rb) parent[ra] = rb }
+            for (p in 0 until contacts.size) {
+                val ci = chainOf[contacts.a[p]]; val cj = chainOf[contacts.b[p]]
+                if (ci != cj) { interfaceContacts++; union(ci, cj) }
+            }
+            for (d in disulfides) union(chainOf[d[0]], chainOf[d[1]])
+            val size = IntArray(nChains)
+            for (c in 0 until nChains) size[find(c)]++
+            largestComplex = size.max()
+        } else largestComplex = 1
     }
     private fun angleAt(i: Int): Double {
         val j = i + 1; val k = i + 2
@@ -589,7 +761,7 @@ class ProteinEngine {
         return atan2(lb2 * (b1x * n2x + b1y * n2y + b1z * n2z), n1x * n2x + n1y * n2y + n1z * n2z)
     }
 
-    // ---- Interaction helpers ----
+    // ---------- Interaction helpers ----------
     fun kick(px: Double, py: Double, pz: Double, radius: Double, strength: Double) {
         for (i in 0 until n) {
             val dx = x[i] - px; val dy = y[i] - py; val dz = z[i] - pz
@@ -599,9 +771,5 @@ class ProteinEngine {
                 vx[i] += dx * k; vy[i] += dy * k; vz[i] += dz * k
             }
         }
-    }
-
-    companion object {
-        fun threeLetter(c: Char) = THREE[c] ?: c.toString()
     }
 }
