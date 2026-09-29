@@ -431,7 +431,7 @@ class MainWindow(startAsWallpaper: Boolean) : JFrame("Hydrophobic Collapse") {
 
             section("Experiments")
             add(check("Grow on a ribosome", s.ribosome) { update(s.copy(ribosome = it)) })
-            add(note("Each new protein is made one residue at a time, front end first, as in a real cell, pausing between domains. The first parts fold before the rest exists. Fun to watch, and it helps all-helix proteins like myoglobin, but most proteins fold a little faster without it."))
+            add(note("Each new protein is made one residue at a time, front end first, as in a real cell, pausing between domains. The first parts fold before the rest exists. About as good as a normal start, and faster for single-domain proteins like lysozyme and myoglobin; two-domain proteins fold less often."))
             add(label("Waiting between domains"))
             add(full(combo(listOf("Patient: waits until each domain is 90% folded", "Normal: 80%", "Hasty: 70%"), s.ribosomeSpeed) { update(s.copy(ribosomeSpeed = it)) }))
             add(gap(6))
