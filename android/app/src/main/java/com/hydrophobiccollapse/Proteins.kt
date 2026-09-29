@@ -17,10 +17,38 @@ class Protein(
     val native: List<IntArray> = emptyList(),
     val note: String = "",
     val group: String = "",
+    /** Known folded structure: Cα x,y,z per residue (NaN where unknown), or null. */
+    val ca: FloatArray? = null,
+    /** Where [ca] came from, e.g. "PDB 1UBQ" or "AlphaFold P69905". */
+    val structureSource: String? = null,
+    /** Which copy each chain belongs to; native contacts only join chains of the same copy. */
+    val copyOf: IntArray? = null,
 ) {
     val length get() = chains.sumOf { it.length }
-    /** Changes whenever the chemistry changes, so a running simulation knows to reload. */
-    val signature get() = chains.joinToString("/")
+    /** Changes whenever the chemistry or structure changes, so a running simulation knows to reload. */
+    val signature get() = chains.joinToString("/") + "|" + (structureSource ?: "")
+
+    fun withStructure(ca: FloatArray?, source: String?) =
+        Protein(id, name, chains, native, note, group, ca, source, copyOf)
+}
+
+/** Cα coordinates as text: "x,y,z" in tenths of an Å per residue, ";" between residues, "_" for none. */
+object CaCodec {
+    fun decode(s: String, n: Int): FloatArray? {
+        val parts = s.split(';')
+        if (parts.size != n) return null
+        val out = FloatArray(3 * n) { Float.NaN }
+        for ((k, p) in parts.withIndex()) {
+            if (p == "_") continue
+            val xyz = p.split(',')
+            if (xyz.size != 3) return null
+            for (d in 0..2) out[3 * k + d] = (xyz[d].toIntOrNull() ?: return null) / 10f
+        }
+        return out
+    }
+    fun encode(ca: FloatArray): String = (0 until ca.size / 3).joinToString(";") { k ->
+        if (ca[3 * k].isNaN()) "_" else "${Math.round(ca[3 * k] * 10)},${Math.round(ca[3 * k + 1] * 10)},${Math.round(ca[3 * k + 2] * 10)}"
+    }
 }
 
 object Proteins {
@@ -36,7 +64,12 @@ object Proteins {
     private const val GCN4 = "RMKQLEDKVEELLSKNYHLENEVARLKKLVGER"
 
     // Natural sequences are checked against UniProt; mature chains without signal peptides or initiator Met.
-    val presets = listOf(
+    val presets: List<Protein> by lazy { basePresets.map { p ->
+        val enc = NativeStructures.encoded[p.id] ?: return@map p
+        p.withStructure(CaCodec.decode(enc.second, p.length), enc.first)
+    } }
+
+    private val basePresets = listOf(
         Protein("chignolin", "Chignolin", listOf("GYDPETGTWG"),
             note = "A 10-residue designed β-hairpin, one of the smallest things that folds.", group = "Small and fast"),
         Protein("trpcage", "Trp-cage TC5b", listOf("NLYIQWLKDGGPSSGRPPPS"),
@@ -93,10 +126,15 @@ object Proteins {
             val chains = o.getJSONArray("chains").let { a -> (0 until a.length()).map { a.getString(it) } }
             val copies = o.optInt("copies", 1).coerceIn(1, MAX_COPIES)
             val all = List(copies) { chains }.flatten()
+            val oneCopy = chains.sumOf { it.length }
+            val source = o.optString("source").ifEmpty { null }
+            val one = if (source != null) CaCodec.decode(o.optString("ca"), oneCopy) else null
+            val ca = one?.let { c -> FloatArray(c.size * copies) { c[it % c.size] } }
             if (all.isEmpty() || all.sumOf { it.length } > MAX_RESIDUES) null
             else Protein(o.getString("id"), o.getString("name"), all,
                 note = "Your protein: ${chains.size} chain${if (chains.size > 1) "s" else ""}${if (copies > 1) " × $copies copies" else ""}, ${all.sumOf { it.length }} residues.",
-                group = "Yours")
+                group = "Yours", ca = ca, structureSource = if (ca != null) source else null,
+                copyOf = IntArray(all.size) { it / chains.size })
         }
     } catch (e: Exception) { emptyList() }
 
@@ -105,10 +143,12 @@ object Proteins {
         (0 until arr.length()).map { arr.getJSONObject(it) }.firstOrNull { it.getString("id") == id }
     } catch (e: Exception) { null }
 
-    fun saveCustom(json: String, id: String?, name: String, chains: List<String>, copies: Int): Pair<String, String> {
+    fun saveCustom(json: String, id: String?, name: String, chains: List<String>, copies: Int,
+                   ca: FloatArray? = null, source: String? = null): Pair<String, String> {
         val arr = try { JSONArray(json) } catch (e: Exception) { JSONArray() }
         val newId = id ?: "custom:${System.currentTimeMillis().toString(36)}"
         val obj = JSONObject().put("id", newId).put("name", name).put("chains", JSONArray(chains)).put("copies", copies)
+        if (ca != null && source != null) obj.put("ca", CaCodec.encode(ca)).put("source", source)
         val out = JSONArray()
         var replaced = false
         for (k in 0 until arr.length()) {
@@ -232,6 +272,7 @@ data class Settings(
     val randomStyle: Int = 0,
     val randomOnWake: Boolean = true,
     val customJson: String = "[]",
+    val nativeBias: Float = 1f,
 ) {
     fun save(p: SharedPreferences) {
         p.edit()
@@ -239,7 +280,7 @@ data class Settings(
             .putFloat("redox", redox).putFloat("speed", speed).putInt("cycle", cycle)
             .putBoolean("hud", hud).putBoolean("saver", saver)
             .putInt("randomLength", randomLength).putInt("randomStyle", randomStyle).putBoolean("randomOnWake", randomOnWake)
-            .putString("customJson", customJson)
+            .putString("customJson", customJson).putFloat("nativeBias", nativeBias)
             .apply()
     }
 
@@ -266,6 +307,7 @@ data class Settings(
                 randomStyle = p.getInt("randomStyle", d.randomStyle),
                 randomOnWake = p.getBoolean("randomOnWake", d.randomOnWake),
                 customJson = p.getString("customJson", d.customJson) ?: d.customJson,
+                nativeBias = p.getFloat("nativeBias", d.nativeBias),
             )
         }
 

@@ -50,6 +50,9 @@ class RenderSnapshotTest {
     }
 
     @Test
+    fun ubiquitinGuidedFrame() = frame("ubiquitin-guided.png", Settings(protein = "ubq", hud = true), 40)
+
+    @Test
     fun hemoglobinFrame() = frame("hemoglobin.png", Settings(protein = "hemoglobin", hud = true), 20)
 
     @Test
@@ -93,8 +96,9 @@ class RenderSnapshotTest {
         val fields = ArrayList<EditText>()
         fun collect(v: View) { if (v is EditText) fields.add(v); if (v is ViewGroup) for (k in 0 until v.childCount) collect(v.getChildAt(k)) }
         collect(dialog.window!!.decorView)
-        fields[0].setText("Test dimer")
-        fields[1].setText(">a\nMKTAYIAKQR\n>b\nGIVEQCCTSI")
+        // Fields: PDB/AlphaFold ID, name, sequence
+        fields[1].setText("Test dimer")
+        fields[2].setText(">a\nMKTAYIAKQR\n>b\nGIVEQCCTSI")
         val dv = dialog.window!!.decorView
         dv.measure(View.MeasureSpec.makeMeasureSpec(900, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(900, View.MeasureSpec.AT_MOST))
         dv.layout(0, 0, 900, dv.measuredHeight)

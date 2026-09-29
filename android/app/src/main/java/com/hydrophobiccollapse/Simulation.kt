@@ -107,6 +107,7 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         val old = settings
         settings = s
         eng.pH = s.ph.toDouble(); eng.saltMM = s.salt.toDouble(); eng.redox = s.redox.toDouble()
+        eng.nativeBias = s.nativeBias.toDouble()
         val reload = when {
             !loaded -> true
             s.protein == Proteins.RANDOM_ID -> old.protein != s.protein || old.randomLength != s.randomLength || old.randomStyle != s.randomStyle
@@ -411,7 +412,8 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         val seqLines = ceil(cells / perLine.toFloat()).toInt()
         val truncated = eng.n + eng.nChains - 1 > seqShown
         val multi = eng.nChains > 1
-        val statRows = if (multi) 3 else 2
+        val structured = eng.hasStructure && settings.nativeBias > 0
+        val statRows = 2 + (if (multi) 1 else 0) + (if (structured) 1 else 0)
         val events = mergedEvents()
         val height = pad + dp(30f) + dp(14f) + seqLines * dp(15f) + (if (truncated) dp(14f) else 0f) + dp(12f) +
             statRows * dp(40f) + dp(4f) + dp(62f) + events.size * dp(14f) + pad
@@ -478,6 +480,12 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
             stats += "CHAINS" to "${eng.nChains}"
             stats += "INTERFACE" to "${eng.interfaceContacts} contacts"
             stats += "LARGEST COMPLEX" to "${eng.largestComplex} of ${eng.nChains}"
+        }
+        if (structured) {
+            // How close to the real structure: share of its contacts formed, and shape difference after superposition
+            stats += "NATIVE CONTACTS" to "${(eng.q * 100).roundToInt()} %"
+            stats += "RMSD TO REAL" to if (eng.rmsd.isNaN()) "—" else "${"%.1f".format(eng.rmsd)} Å"
+            stats += "STRUCTURE" to (eng.structureSource ?: "")
         }
         for ((k, s) in stats.withIndex()) {
             val sx = left + (k % 3) * colW; val sy = y + (k / 3) * dp(40f)

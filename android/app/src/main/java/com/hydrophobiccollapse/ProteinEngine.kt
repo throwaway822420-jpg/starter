@@ -8,9 +8,11 @@ import kotlin.math.cos
 import kotlin.math.exp
 import kotlin.math.floor
 import kotlin.math.ln
+import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
 import kotlin.math.sign
+import kotlin.math.sin
 import kotlin.math.sqrt
 
 // Residue-level protein physics: one bead per amino acid (its Cα atom), any number of chains.
@@ -23,7 +25,7 @@ private const val EPS_WATER = 80.0
 private const val DEG = PI / 180
 
 private const val DT = 0.015
-private const val GAMMA = 0.5
+private const val GAMMA = 0.15        // low solvent friction: same equilibrium, faster folding
 private const val K_BOND = 60.0
 private const val R_BOND = 3.8
 private const val K_ANGLE_WALL = 30.0
@@ -56,6 +58,22 @@ private const val FMAX = 200.0
 private const val MC_EVERY = 25
 private const val ECUT_MAX = 18.0         // screened electrostatics are negligible beyond this
 private const val SKIN = 2.5              // neighbour-list margin, Å
+
+// Structure-based ("Gō") terms, switched on in proportion to nativeBias when a real structure is known
+private const val NAT_CONTACT = 7.5       // Cα pairs closer than this in the real structure are native contacts…
+private const val NAT_CONTACT_LONG = 10.0 // …or this, for residues far apart in sequence or on different chains:
+                                          // packed helices sit 8–11 Å apart at their Cα atoms
+private const val LONG_SEP = 8
+private const val EPS_NATIVE = 0.6        // native contact well depth at full guidance, kcal/mol
+private const val NAT_CUT = 1.8           // native attraction reaches out to this multiple of the native distance
+private const val K_ANG_NAT = 30.0        // kcal/(mol·rad²) toward the native bond angle
+private const val K1_DIH_NAT = 1.25       // dihedral cosine terms toward the native twist
+private const val K3_DIH_NAT = 0.625
+// Weak long-range pull between residues that touch across a real interface. It stands in for the diffusion
+// and electrostatic steering that bring partners together in reality, which would take far too long to simulate.
+private const val EPS_DOCK = 0.2
+private const val W_DOCK = 6.0
+private const val DISSOCIATE = 1.4       // complexes start with each chain this much further from the centre than in the real structure
 
 const val AMINO_ACIDS = "ARNDCQEGHILKMFPSTWYV"
 private const val MAX_SIG = 0.9 * 2 * 3.5
@@ -167,11 +185,28 @@ class ProteinEngine {
     val contacts = PairList()                  // residue pairs in contact (|i−j| ≥ 3 or different chains)
     var interfaceContacts = 0; private set     // contacts between different chains
     var largestComplex = 1; private set        // chains in the biggest group held together by contacts or disulfides
+
+    // Known structure (PDB or AlphaFold) and how strongly to steer toward it, 0…1
+    var nativeBias = 1.0
+    var structureSource: String? = null; private set
+    val hasStructure get() = nNat > 0
+    var q = Double.NaN; private set            // fraction of native contacts formed
+    var rmsd = Double.NaN; private set         // Cα RMSD to the known structure after best superposition, Å
+    private var hasNat = BooleanArray(0)
+    private var natX = DoubleArray(0); private var natY = DoubleArray(0); private var natZ = DoubleArray(0)
+    private var theta0 = DoubleArray(0); private var phi0 = DoubleArray(0)
+    private var ncI = IntArray(0); private var ncJ = IntArray(0); private var ncR = DoubleArray(0); private var nNat = 0
+    private var natGroup = IntArray(0)
+    private var nativeKeys = HashSet<Long>()
+    private var shortNat = BooleanArray(0)
+    private var rmsdMeaningful = false
     val bridges = ArrayList<IntArray>()
     val disulfides = ArrayList<IntArray>()     // [i, j, native ? 1 : 0]
 
     // xorshift64* random numbers: fast and allocation-free
     private var seed = System.nanoTime() or 1L
+    /** Tests fix the random sequence. */
+    fun seed(value: Long) { seed = value or 1L }
     private fun rand(): Double {
         seed = seed xor (seed ushr 12); seed = seed xor (seed shl 25); seed = seed xor (seed ushr 27)
         return ((seed * 2685821657736338717L) ushr 11).toDouble() / (1L shl 53).toDouble()
@@ -240,12 +275,47 @@ class ProteinEngine {
         titratable = sites.map { it.res }.distinct().sorted().toIntArray()
         charged = IntArray(n)
         rBox = 5 * sqrt(n.toDouble()) + 10 + 8 * sqrt(nChains.toDouble())
+        loadStructure(protein)
         events.clear(); flashes.clear(); time = 0.0; stepCount = 0
         grab = -1
         unfoldCoords()
         updateCharges()
         measure()
     }
+
+    private fun loadStructure(protein: Protein) {
+        val ca = protein.ca
+        hasNat = BooleanArray(n); natX = DoubleArray(n); natY = DoubleArray(n); natZ = DoubleArray(n)
+        theta0 = DoubleArray(n) { Double.NaN }; phi0 = DoubleArray(n) { Double.NaN }
+        natGroup = IntArray(n) { protein.copyOf?.getOrNull(chainOf[it]) ?: 0 }
+        nativeKeys = HashSet(); nNat = 0; q = Double.NaN; rmsd = Double.NaN
+        structureSource = null
+        if (ca == null || ca.size != 3 * n) return
+        for (i in 0 until n) if (!ca[3 * i].isNaN()) {
+            hasNat[i] = true; natX[i] = ca[3 * i].toDouble(); natY[i] = ca[3 * i + 1].toDouble(); natZ[i] = ca[3 * i + 2].toDouble()
+        }
+        fun ok(i: Int, len: Int) = i + len - 1 < n && chainOf[i] == chainOf[i + len - 1] && (0 until len).all { hasNat[i + it] }
+        for (i in 0 until n) {
+            if (ok(i, 3)) theta0[i] = angleOf(natX, natY, natZ, i)
+            if (ok(i, 4)) phi0[i] = dihedralOf(natX, natY, natZ, i)
+        }
+        val ci = ArrayList<Int>(); val cj = ArrayList<Int>(); val cr = ArrayList<Double>()
+        for (i in 0 until n) {
+            if (!hasNat[i]) continue
+            for (j in i + 1 until n) {
+                if (!hasNat[j] || natGroup[i] != natGroup[j]) continue
+                if (chainOf[i] == chainOf[j] && j - i < 4) continue
+                val dx = natX[i] - natX[j]; val dy = natY[i] - natY[j]; val dz = natZ[i] - natZ[j]
+                val d2 = dx * dx + dy * dy + dz * dz
+                val cut = if (chainOf[i] != chainOf[j] || j - i >= LONG_SEP) NAT_CONTACT_LONG else NAT_CONTACT
+                if (d2 < cut * cut) { ci.add(i); cj.add(j); cr.add(sqrt(d2)); nativeKeys.add(pairKey(i, j)) }
+            }
+        }
+        ncI = ci.toIntArray(); ncJ = cj.toIntArray(); ncR = cr.toDoubleArray(); nNat = ncI.size
+        if (nNat > 0) structureSource = protein.structureSource
+        rmsdMeaningful = nNat > 0 && (protein.copyOf?.all { it == 0 } ?: true)
+    }
+    private fun pairKey(i: Int, j: Int) = (i.toLong() shl 32) or j.toLong()
 
     // Each chain an extended random coil, chains spread apart on a grid
     private fun unfoldCoords() {
@@ -254,15 +324,35 @@ class ProteinEngine {
         var longest = 1
         for (c in 0 until nChains) longest = maxOf(longest, chainStart[c + 1] - chainStart[c])
         val spacing = if (nChains > 1) 3.0 * sqrt(longest.toDouble()) + 12 else 0.0
+        val keepAll = 0.75 * rBox
+        // With a known complex, each chain starts around its real place in it, pushed further out (DISSOCIATE):
+        // the complex begins dissociated, with every subunit facing its real partners
+        val fromComplex = rmsdMeaningful && nChains > 1 && (0 until nChains).all { c -> (chainStart[c] until chainStart[c + 1]).any { hasNat[it] } }
+        var mx = 0.0; var my = 0.0; var mz = 0.0; var mc = 0
+        if (fromComplex) for (i in 0 until n) if (hasNat[i]) { mx += natX[i]; my += natY[i]; mz += natZ[i]; mc++ }
+        // Chain start centres, and how far each chain's coil may wander without reaching into a neighbour's space
+        val cenX = DoubleArray(nChains); val cenY = DoubleArray(nChains); val cenZ = DoubleArray(nChains)
         for (c in 0 until nChains) {
             val gx = (c % side) - (side - 1) / 2.0
             val gy = ((c / side) % side) - (side - 1) / 2.0
             val gz = (c / (side * side)) - (side - 1) / 2.0
-            val ox = gx * spacing; val oy = gy * spacing; val oz = gz * spacing
+            cenX[c] = gx * spacing; cenY[c] = gy * spacing; cenZ[c] = gz * spacing
+            if (fromComplex) {
+                var cx = 0.0; var cy = 0.0; var cz = 0.0; var k = 0
+                for (i in chainStart[c] until chainStart[c + 1]) if (hasNat[i]) { cx += natX[i]; cy += natY[i]; cz += natZ[i]; k++ }
+                cenX[c] = DISSOCIATE * (cx / k - mx / mc); cenY[c] = DISSOCIATE * (cy / k - my / mc); cenZ[c] = DISSOCIATE * (cz / k - mz / mc)
+            }
+        }
+        val wander = DoubleArray(nChains) { c ->
+            var nearest = Double.MAX_VALUE
+            for (d in 0 until nChains) if (d != c) nearest = min(nearest, sqrt((cenX[c] - cenX[d]).let { it * it } + (cenY[c] - cenY[d]).let { it * it } + (cenZ[c] - cenZ[d]).let { it * it }))
+            if (nChains > 1) max(0.45 * nearest, 8.0) else keepAll
+        }
+        for (c in 0 until nChains) {
+            val ox = cenX[c]; val oy = cenY[c]; val oz = cenZ[c]
             val s0 = chainStart[c]; val s1 = chainStart[c + 1]
             var dx = 1.0; var dy = 0.0; var dz = 0.0
             x[s0] = ox; y[s0] = oy; z[s0] = oz
-            val keep = 0.75 * rBox
             for (i in s0 + 1 until s1) {
                 var nx: Double; var ny: Double; var nz: Double; var len: Double
                 do {
@@ -270,7 +360,7 @@ class ProteinEngine {
                     // Turn back toward the chain's own start when wandering too far (long chains)
                     val rx = x[i - 1] - ox; val ry = y[i - 1] - oy; val rz = z[i - 1] - oz
                     val r = sqrt(rx * rx + ry * ry + rz * rz)
-                    if (r > (if (nChains > 1) 0.5 * spacing else keep)) { nx -= 0.6 * rx / r; ny -= 0.6 * ry / r; nz -= 0.6 * rz / r }
+                    if (r > wander[c]) { nx -= 0.6 * rx / r; ny -= 0.6 * ry / r; nz -= 0.6 * rz / r }
                     len = sqrt(nx * nx + ny * ny + nz * nz)
                 } while (len < 0.3)
                 dx = nx / len; dy = ny / len; dz = nz / len
@@ -363,6 +453,10 @@ class ProteinEngine {
             gridPairs(all, n, LJ_CUT * MAX_SIG + SKIN) { i, j, _ -> if (!excludedShort(i, j)) shortPairs.add(i, j) }
             gridPairs(titratable, titratable.size, ECUT_MAX + SKIN) { i, j, _ -> if (!excludedElec(i, j)) elecPairs.add(i, j) }
         }
+        // Mark which short-range pairs are native contacts; their generic attraction fades as guidance rises
+        if (shortNat.size < shortPairs.size) shortNat = BooleanArray(shortPairs.a.size)
+        if (nNat > 0) for (p in 0 until shortPairs.size) shortNat[p] = nativeKeys.contains(pairKey(shortPairs.a[p], shortPairs.b[p]))
+        else shortNat.fill(false, 0, shortPairs.size)
         System.arraycopy(x, 0, x0, 0, n); System.arraycopy(y, 0, y0, 0, n); System.arraycopy(z, 0, z0, 0, n)
         listsValid = true
     }
@@ -381,6 +475,7 @@ class ProteinEngine {
         val n = n; val x = x; val y = y; val z = z
         fx.fill(0.0); fy.fill(0.0); fz.fill(0.0)
         var eBond = 0.0; var eLocal = 0.0; var eContact = 0.0; var eElec = 0.0
+        val lam = if (nNat > 0) nativeBias.coerceIn(0.0, 1.0) else 0.0
         if (measure) contacts.clear()
 
         // Bonds (within a chain)
@@ -408,8 +503,11 @@ class ProteinEngine {
             var u = 0.0; var dU = 0.0
             if (th < THETA_MIN) { u += K_ANGLE_WALL * (THETA_MIN - th) * (THETA_MIN - th); dU += -2 * K_ANGLE_WALL * (THETA_MIN - th) }
             if (th > THETA_MAX) { u += K_ANGLE_WALL * (th - THETA_MAX) * (th - THETA_MAX); dU += 2 * K_ANGLE_WALL * (th - THETA_MAX) }
-            val gh = exp(-(th - THETA_HELIX) * (th - THETA_HELIX) / (2 * W_THETA_H * W_THETA_H)) * A_HELIX_ANGLE * wAngH[i]
-            val gs = exp(-(th - THETA_STRAND) * (th - THETA_STRAND) / (2 * W_THETA_S * W_THETA_S)) * A_STRAND_ANGLE * wAngS[i]
+            val t0 = theta0[i]
+            val gw = if (t0.isNaN()) 1.0 else 1 - lam   // generic preferences give way to the known structure
+            val gh = exp(-(th - THETA_HELIX) * (th - THETA_HELIX) / (2 * W_THETA_H * W_THETA_H)) * A_HELIX_ANGLE * wAngH[i] * gw
+            val gs = exp(-(th - THETA_STRAND) * (th - THETA_STRAND) / (2 * W_THETA_S * W_THETA_S)) * A_STRAND_ANGLE * wAngS[i] * gw
+            if (!t0.isNaN() && lam > 0) { val d = th - t0; u += lam * K_ANG_NAT * d * d; dU += 2 * lam * K_ANG_NAT * d }
             u -= gh + gs
             dU += gh * (th - THETA_HELIX) / (W_THETA_H * W_THETA_H) + gs * (th - THETA_STRAND) / (W_THETA_S * W_THETA_S)
             val g = dU / s
@@ -436,9 +534,17 @@ class ProteinEngine {
             val lb2 = sqrt(b2x * b2x + b2y * b2y + b2z * b2z)
             val phi = atan2(lb2 * (b1x * n2x + b1y * n2y + b1z * n2z), n1x * n2x + n1y * n2y + n1z * n2z)
             val dh = wrap(phi - PHI_HELIX); val ds = wrap(phi - PHI_STRAND)
-            val gh = D_HELIX * wDihH[i] * exp(-(dh * dh) / (2 * W_PHI_H * W_PHI_H))
-            val gs = D_STRAND * wDihS[i] * exp(-(ds * ds) / (2 * W_PHI_S * W_PHI_S))
-            val dU = gh * dh / (W_PHI_H * W_PHI_H) + gs * ds / (W_PHI_S * W_PHI_S)
+            val p0 = phi0[i]
+            val gw = if (p0.isNaN()) 1.0 else 1 - lam
+            val gh = D_HELIX * wDihH[i] * exp(-(dh * dh) / (2 * W_PHI_H * W_PHI_H)) * gw
+            val gs = D_STRAND * wDihS[i] * exp(-(ds * ds) / (2 * W_PHI_S * W_PHI_S)) * gw
+            var dU = gh * dh / (W_PHI_H * W_PHI_H) + gs * ds / (W_PHI_S * W_PHI_S)
+            var uNat = 0.0
+            if (!p0.isNaN() && lam > 0) {
+                val d = phi - p0
+                uNat = lam * (K1_DIH_NAT * (1 - cos(d)) + K3_DIH_NAT * (1 - cos(3 * d)))
+                dU += lam * (K1_DIH_NAT * sin(d) + 3 * K3_DIH_NAT * sin(3 * d))
+            }
             // dφ/dr for the four points (Bekker / Blondel–Karplus)
             val a0 = -lb2 / n1sq; val a3 = lb2 / n2sq
             val g0x = a0 * n1x; val g0y = a0 * n1y; val g0z = a0 * n1z
@@ -451,7 +557,7 @@ class ProteinEngine {
             fx[i1] -= dU * g1x; fy[i1] -= dU * g1y; fz[i1] -= dU * g1z
             fx[i2] -= dU * g2x; fy[i2] -= dU * g2y; fz[i2] -= dU * g2z
             fx[i3] -= dU * g3x; fy[i3] -= dU * g3y; fz[i3] -= dU * g3z
-            if (measure) eLocal -= gh + gs
+            if (measure) eLocal += uNat - gh - gs
         }
 
         // Helical i→i+4 hydrogen bond
@@ -462,7 +568,7 @@ class ProteinEngine {
             val r = sqrt(dx * dx + dy * dy + dz * dz).coerceAtLeast(1e-6)
             val d = r - R_HB
             if (abs(d) > 4 * W_HB) continue
-            val g = H_BOND * wHB[i] * exp(-(d * d) / (2 * W_HB * W_HB))
+            val g = H_BOND * wHB[i] * exp(-(d * d) / (2 * W_HB * W_HB)) * (if (hasNat[i] && hasNat[j]) 1 - lam else 1.0)
             val f = -(g * d / (W_HB * W_HB)) / r
             fx[i] += f * dx; fy[i] += f * dy; fz[i] += f * dz
             fx[j] -= f * dx; fy[j] -= f * dy; fz[j] -= f * dz
@@ -472,13 +578,20 @@ class ProteinEngine {
         // Contacts: residue-specific Lennard-Jones (minimum at σ, depth ε). Chains interact exactly as residues within one chain do.
         val sc = 1 / LJ_CUT.pow(6)
         val sa = shortPairs.a; val sb = shortPairs.b
+        val nat = shortNat
         for (p in 0 until shortPairs.size) {
             val i = sa[p]; val j = sb[p]
             val dx = x[i] - x[j]; val dy = y[i] - y[j]; val dz = z[i] - z[j]
             var r2 = dx * dx + dy * dy + dz * dz
             val s: Double; val ep: Double; val cut2: Double; val attractive: Boolean
             if (j == i + 3 && chainOf[i] == chainOf[j]) { s = SIG_I3; ep = 0.5; attractive = false; cut2 = s * s }
-            else { s = 0.9 * (rad[i] + rad[j]); ep = EPS20[type[i] * 20 + type[j]]; attractive = true; cut2 = (LJ_CUT * s) * (LJ_CUT * s) }
+            else {
+                s = 0.9 * (rad[i] + rad[j]); attractive = true; cut2 = (LJ_CUT * s) * (LJ_CUT * s)
+                // With a known structure, native pairs hand over to the native term and other contacts weaken
+                val w = if (lam == 0.0) 1.0 else if (nat[p]) 1 - lam
+                        else if (hasNat[i] && hasNat[j] && natGroup[i] == natGroup[j]) 1 - 0.8 * lam else 1.0
+                ep = EPS20[type[i] * 20 + type[j]] * w
+            }
             if (r2 >= cut2) continue
             if (r2 < 1) r2 = 1.0
             val s2 = s * s / r2; val s6 = s2 * s2 * s2
@@ -497,8 +610,39 @@ class ProteinEngine {
             }
         }
 
+        // Structure-based contacts: a 12–10 well centred on each pair's distance in the real structure
+        if (lam > 0) {
+            val epsN = lam * EPS_NATIVE
+            val c2 = 1 / (NAT_CUT * NAT_CUT); val c10 = c2 * c2 * c2 * c2 * c2; val c12 = c10 * c2
+            val shift = 5 * c12 - 6 * c10
+            for (k in 0 until nNat) {
+                val i = ncI[k]; val j = ncJ[k]; val r0 = ncR[k]
+                val dx = x[i] - x[j]; val dy = y[i] - y[j]; val dz = z[i] - z[j]
+                var r2 = dx * dx + dy * dy + dz * dz
+                if (chainOf[i] != chainOf[j]) {
+                    val r = sqrt(r2).coerceAtLeast(1e-6); val d = r - r0
+                    if (d < 4 * W_DOCK) {
+                        val g = lam * EPS_DOCK * exp(-d * d / (2 * W_DOCK * W_DOCK))
+                        val f = -(g * d / (W_DOCK * W_DOCK)) / r
+                        fx[i] += f * dx; fy[i] += f * dy; fz[i] += f * dz
+                        fx[j] -= f * dx; fy[j] -= f * dy; fz[j] -= f * dz
+                        if (measure) eContact -= g
+                    }
+                }
+                if (r2 >= NAT_CUT * NAT_CUT * r0 * r0) continue
+                if (r2 < 1) r2 = 1.0
+                val s2 = r0 * r0 / r2; val s10 = s2 * s2 * s2 * s2 * s2; val s12 = s10 * s2
+                var f = 60 * epsN * (s12 - s10) / r2
+                val r = sqrt(r2)
+                if (abs(f * r) > FMAX) f = sign(f) * FMAX / r
+                fx[i] += f * dx; fy[i] += f * dy; fz[i] += f * dz
+                fx[j] -= f * dx; fy[j] -= f * dy; fz[j] -= f * dz
+                if (measure) eContact += epsN * (5 * s12 - 6 * s10 - shift)
+            }
+        }
+
         // Screened electrostatics (Debye–Hückel) between charged residues
-        val lam = debye(); val ecut = min(3 * lam, ECUT_MAX); val ecut2 = ecut * ecut
+        val debyeLen = debye(); val ecut = min(3 * debyeLen, ECUT_MAX); val ecut2 = ecut * ecut
         val ea = elecPairs.a; val eb = elecPairs.b
         for (p in 0 until elecPairs.size) {
             val i = ea[p]; val j = eb[p]
@@ -509,8 +653,8 @@ class ProteinEngine {
             if (r2 > ecut2) continue
             if (r2 < 9) r2 = 9.0
             val r = sqrt(r2)
-            val u = COULOMB * qq * exp(-r / lam) / (EPS_WATER * r)
-            val f = u * (1 / r + 1 / lam) / r
+            val u = COULOMB * qq * exp(-r / debyeLen) / (EPS_WATER * r)
+            val f = u * (1 / r + 1 / debyeLen) / r
             fx[i] += f * dx; fy[i] += f * dy; fz[i] += f * dz
             fx[j] -= f * dx; fy[j] -= f * dy; fz[j] -= f * dz
             if (measure) eElec += u
@@ -723,9 +867,9 @@ class ProteinEngine {
             val i = elecPairs.a[p]; val j = elecPairs.b[p]
             if (charge[i] * charge[j] < 0 && (chainOf[i] != chainOf[j] || j - i >= 3) && dist(i, j) < 7.5) bridges.add(intArrayOf(i, j))
         }
-        var q = 0.0
-        for (i in 0 until n) q += charge[i]
-        netCharge = Math.round(q).toInt()
+        var qSum = 0.0
+        for (i in 0 until n) qSum += charge[i]
+        netCharge = Math.round(qSum).toInt()
         disulfides.clear()
         for (i in 0 until n) if (partner[i] > i) disulfides.add(intArrayOf(i, partner[i], if (isNative(i, partner[i])) 1 else 0))
         // Interfaces: contacts between chains, and the largest group of chains stuck together
@@ -743,7 +887,72 @@ class ProteinEngine {
             for (c in 0 until nChains) size[find(c)]++
             largestComplex = size.max()
         } else largestComplex = 1
+        // How close to the known structure
+        if (nNat > 0) {
+            var formed = 0
+            for (k in 0 until nNat) {
+                val r0 = ncR[k] * 1.2
+                val dx = x[ncI[k]] - x[ncJ[k]]; val dy = y[ncI[k]] - y[ncJ[k]]; val dz = z[ncI[k]] - z[ncJ[k]]
+                if (dx * dx + dy * dy + dz * dz < r0 * r0) formed++
+            }
+            q = formed.toDouble() / nNat
+            rmsd = if (rmsdMeaningful) rmsdToNative() else Double.NaN
+        }
     }
+    private fun angleOf(ax: DoubleArray, ay: DoubleArray, az: DoubleArray, i: Int): Double {
+        val j = i + 1; val k = i + 2
+        val ux = ax[i] - ax[j]; val uy = ay[i] - ay[j]; val uz = az[i] - az[j]
+        val vx = ax[k] - ax[j]; val vy = ay[k] - ay[j]; val vz = az[k] - az[j]
+        val lu = sqrt(ux * ux + uy * uy + uz * uz); val lv = sqrt(vx * vx + vy * vy + vz * vz)
+        return acos(clamp((ux * vx + uy * vy + uz * vz) / (lu * lv), -1.0, 1.0))
+    }
+    private fun dihedralOf(ax: DoubleArray, ay: DoubleArray, az: DoubleArray, i: Int): Double {
+        val b1x = ax[i + 1] - ax[i]; val b1y = ay[i + 1] - ay[i]; val b1z = az[i + 1] - az[i]
+        val b2x = ax[i + 2] - ax[i + 1]; val b2y = ay[i + 2] - ay[i + 1]; val b2z = az[i + 2] - az[i + 1]
+        val b3x = ax[i + 3] - ax[i + 2]; val b3y = ay[i + 3] - ay[i + 2]; val b3z = az[i + 3] - az[i + 2]
+        val n1x = b1y * b2z - b1z * b2y; val n1y = b1z * b2x - b1x * b2z; val n1z = b1x * b2y - b1y * b2x
+        val n2x = b2y * b3z - b2z * b3y; val n2y = b2z * b3x - b2x * b3z; val n2z = b2x * b3y - b2y * b3x
+        val lb2 = sqrt(b2x * b2x + b2y * b2y + b2z * b2z)
+        return atan2(lb2 * (b1x * n2x + b1y * n2y + b1z * n2z), n1x * n2x + n1y * n2y + n1z * n2z)
+    }
+
+    /** Cα RMSD after optimal superposition (Horn's quaternion method), over residues with known positions. */
+    fun rmsdToNative(): Double {
+        var m = 0
+        var ax = 0.0; var ay = 0.0; var az = 0.0; var bx = 0.0; var by = 0.0; var bz = 0.0
+        for (i in 0 until n) if (hasNat[i]) { m++; ax += x[i]; ay += y[i]; az += z[i]; bx += natX[i]; by += natY[i]; bz += natZ[i] }
+        if (m < 3) return Double.NaN
+        ax /= m; ay /= m; az /= m; bx /= m; by /= m; bz /= m
+        val s = DoubleArray(9); var g = 0.0
+        for (i in 0 until n) if (hasNat[i]) {
+            val p = doubleArrayOf(x[i] - ax, y[i] - ay, z[i] - az); val t = doubleArrayOf(natX[i] - bx, natY[i] - by, natZ[i] - bz)
+            for (a in 0..2) for (b in 0..2) s[a * 3 + b] += p[a] * t[b]
+            g += p[0] * p[0] + p[1] * p[1] + p[2] * p[2] + t[0] * t[0] + t[1] * t[1] + t[2] * t[2]
+        }
+        val (sxx, sxy, sxz) = Triple(s[0], s[1], s[2]); val (syx, syy, syz) = Triple(s[3], s[4], s[5]); val (szx, szy, szz) = Triple(s[6], s[7], s[8])
+        val k = arrayOf(
+            doubleArrayOf(sxx + syy + szz, syz - szy, szx - sxz, sxy - syx),
+            doubleArrayOf(syz - szy, sxx - syy - szz, sxy + syx, szx + sxz),
+            doubleArrayOf(szx - sxz, sxy + syx, -sxx + syy - szz, syz + szy),
+            doubleArrayOf(sxy - syx, szx + sxz, syz + szy, -sxx - syy + szz),
+        )
+        return sqrt(maxOf(0.0, (g - 2 * largestEigenvalue4(k)) / m))
+    }
+    /** Largest eigenvalue of a symmetric 4×4 matrix by Jacobi rotations. */
+    private fun largestEigenvalue4(a: Array<DoubleArray>): Double {
+        repeat(60) {
+            var p = 0; var q = 1; var big = 0.0
+            for (i in 0 until 4) for (j in i + 1 until 4) if (abs(a[i][j]) > big) { big = abs(a[i][j]); p = i; q = j }
+            if (big < 1e-12) return@repeat
+            val theta = (a[q][q] - a[p][p]) / (2 * a[p][q])
+            val t = (if (theta >= 0) 1.0 else -1.0) / (abs(theta) + sqrt(theta * theta + 1))
+            val c = 1 / sqrt(t * t + 1); val sn = t * c
+            for (r in 0 until 4) { val rp = a[r][p]; val rq = a[r][q]; a[r][p] = c * rp - sn * rq; a[r][q] = sn * rp + c * rq }
+            for (r in 0 until 4) { val pr = a[p][r]; val qr = a[q][r]; a[p][r] = c * pr - sn * qr; a[q][r] = sn * pr + c * qr }
+        }
+        return maxOf(maxOf(a[0][0], a[1][1]), maxOf(a[2][2], a[3][3]))
+    }
+
     private fun angleAt(i: Int): Double {
         val j = i + 1; val k = i + 2
         val ax = x[i] - x[j]; val ay = y[i] - y[j]; val az = z[i] - z[j]

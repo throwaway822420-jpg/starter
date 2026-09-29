@@ -158,6 +158,7 @@ class SettingsActivity : Activity() {
     private lateinit var proteinNote: TextView
     private lateinit var editRow: LinearLayout
     private lateinit var randomBox: LinearLayout
+    private lateinit var guidanceBox: LinearLayout
     private var entries = listOf<Entry>()
 
     private fun proteinEntries(): List<Entry> {
@@ -186,6 +187,14 @@ class SettingsActivity : Activity() {
         col.addView(proteinSpinner, margins(top = 6))
         proteinNote = body("")
         col.addView(proteinNote, margins(top = 6))
+
+        // How strongly to steer toward the real structure, when there is one
+        guidanceBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        guidanceBox.addView(slider("Native-structure guidance", 0f, 1f, 0.05f, s.nativeBias, { "${(it * 100).roundToInt()} %" }) {
+            update(s.copy(nativeBias = it))
+        })
+        guidanceBox.addView(body("100 % folds toward the real structure. 0 % uses only generic physics, which collapses but rarely finds the real fold.").apply { textSize = 12f }, margins(top = 2))
+        col.addView(guidanceBox)
 
         // Random mode
         randomBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -219,11 +228,13 @@ class SettingsActivity : Activity() {
         val isCustom = s.protein.startsWith("custom:")
         randomBox.visibility = if (isRandom) View.VISIBLE else View.GONE
         editRow.visibility = if (isCustom) View.VISIBLE else View.GONE
-        val p = preview.sim.protein
+        val p = if (isRandom) preview.sim.protein else Proteins.byId(s.protein, s.customJson)
+        val structure = if (p.ca != null) " Folds toward its real structure (${p.structureSource})." else if (isRandom) "" else " No experimental structure, so generic physics only."
         proteinNote.text = when {
             isRandom -> "Now showing: ${p.name}. ${p.note}${slowHint(p.length)}"
-            else -> Proteins.byId(s.protein, s.customJson).let { it.note + slowHint(it.length) }
+            else -> p.note + structure + slowHint(p.length)
         }
+        guidanceBox.visibility = if (p.ca != null) View.VISIBLE else View.GONE
     }
 
     private fun slowHint(len: Int) = when {
@@ -235,6 +246,24 @@ class SettingsActivity : Activity() {
     private fun openEditor(existingId: String?) {
         val entry = existingId?.let { Proteins.customJsonEntry(s.customJson, it) }
         val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(8), dp(20), dp(4)) }
+
+        // A structure fetched from the PDB or AlphaFold, kept while the sequence still matches it
+        var fetched: StructureIO.Loaded? = null
+        var existingCa = entry?.optString("ca")?.ifEmpty { null }
+        val existingSource = entry?.optString("source")?.ifEmpty { null }
+        box.addView(label("Load from the PDB or AlphaFold (optional)"))
+        val fetchRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        val query = android.widget.EditText(this).apply {
+            hint = "1UBQ, 2HHB:A,B or P69905"; setSingleLine(); setTextColor(colText); typeface = Typeface.MONOSPACE
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS or android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+        }
+        fetchRow.addView(query, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        val fetchBtn = button("Fetch", primary = false) {}
+        fetchRow.addView(fetchBtn, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { marginStart = dp(8) })
+        box.addView(fetchRow, margins(top = 2))
+        val fetchStatus = TextView(this).apply { textSize = 12f; setTextColor(colHaze); text = "PDB ID for an experimental structure (add :A,B to pick chains), or a UniProt ID for an AlphaFold prediction." }
+        box.addView(fetchStatus, margins(top = 4))
+
         val name = android.widget.EditText(this).apply {
             hint = "Name"; setSingleLine(); setTextColor(colText)
             setText(entry?.optString("name") ?: "")
@@ -249,6 +278,31 @@ class SettingsActivity : Activity() {
             setText(entry?.optJSONArray("chains")?.let { a -> (0 until a.length()).joinToString(" / ") { a.getString(it) } } ?: "")
         }
         box.addView(seqField, margins(top = 8))
+        fetchBtn.setOnClickListener {
+            val q = query.text.toString().trim()
+            StructureIO.queryProblem(q)?.let { fetchStatus.setTextColor(0xFFFF7D8E.toInt()); fetchStatus.text = it; return@setOnClickListener }
+            fetchBtn.isEnabled = false; fetchStatus.setTextColor(colHaze); fetchStatus.text = "Downloading $q…"
+            Thread {
+                val result = try { Result.success(StructureIO.fetch(q)) } catch (e: Exception) { Result.failure(e) }
+                runOnUiThread {
+                    fetchBtn.isEnabled = true
+                    result.onSuccess { loaded ->
+                        fetched = loaded; existingCa = null
+                        name.setText(loaded.title.take(60))
+                        seqField.setText(loaded.chains.joinToString(" / ") { it.seq })
+                        fetchStatus.setTextColor(colHaze)
+                        fetchStatus.text = "Loaded ${loaded.source}: ${loaded.chains.size} chain${if (loaded.chains.size > 1) "s" else ""}, ${loaded.length} residues with known positions."
+                    }.onFailure { e ->
+                        fetchStatus.setTextColor(0xFFFF7D8E.toInt())
+                        fetchStatus.text = when (e) {
+                            is java.net.UnknownHostException -> "No internet connection. Connect and try again."
+                            is java.io.IOException -> e.message ?: "The download failed. Try again."
+                            else -> "That file couldn't be read. Try another ID."
+                        }
+                    }
+                }
+            }.start()
+        }
         var copies = entry?.optInt("copies", 1) ?: 1
         val copiesOut = TextView(this).apply { setTextColor(colText); textSize = 12f; typeface = Typeface.MONOSPACE }
         val status = TextView(this).apply { textSize = 12f; setLineSpacing(0f, 1.2f) }
@@ -262,7 +316,13 @@ class SettingsActivity : Activity() {
                 else -> {
                     val nCh = parsed.chains.size * copies
                     status.setTextColor(colHaze)
-                    status.text = "$total residues · $nCh chain${if (nCh > 1) "s" else ""}.${slowHint(total)}"
+                    val f = fetched
+                    val structure = when {
+                        f == null -> ""
+                        f.chains.map { it.seq } == parsed.chains -> " Folds toward ${f.source}."
+                        else -> " The sequence no longer matches ${f.source}, so its structure won't be used."
+                    }
+                    status.text = "$total residues · $nCh chain${if (nCh > 1) "s" else ""}.$structure${slowHint(total)}"
                 }
             }
             return parsed
@@ -307,7 +367,15 @@ class SettingsActivity : Activity() {
                 val total = parsed.chains.sumOf { it.length } * copies
                 if (parsed.error != null || total > Proteins.MAX_RESIDUES) return@setOnClickListener
                 val title = name.text.toString().trim().ifEmpty { "My protein" }
-                val (json, id) = Proteins.saveCustom(s.customJson, existingId, title, parsed.chains, copies)
+                // Keep the structure only if the sequence still matches it exactly
+                val f = fetched
+                var ca: FloatArray? = null; var source: String? = null
+                if (f != null && f.chains.map { it.seq } == parsed.chains) { ca = f.ca; source = f.source }
+                else if (f == null && existingCa != null && existingSource != null) {
+                    val oldChains = entry?.optJSONArray("chains")?.let { a -> (0 until a.length()).map { a.getString(it) } }
+                    if (oldChains == parsed.chains) { ca = CaCodec.decode(existingCa!!, parsed.chains.sumOf { it.length }); source = existingSource }
+                }
+                val (json, id) = Proteins.saveCustom(s.customJson, existingId, title, parsed.chains, copies, ca, source)
                 update(s.copy(customJson = json, protein = id))
                 refreshProteinUi()
                 dialog.dismiss()

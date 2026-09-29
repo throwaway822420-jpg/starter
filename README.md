@@ -47,7 +47,31 @@ Each bead is one amino acid, placed at its Cα atom. The chain moves under Lange
 
 **Scaling:** non-bonded pairs come from neighbour lists rebuilt on a spatial grid, so the cost grows roughly linearly with size. A 3000-residue chain takes about 1 ms per step on a desktop CPU.
 
-**Limits:** this is a teaching-grade coarse-grained model, not a structure predictor. Proteins collapse, form helices and strands, and make and break disulfides with the right trends, but they won't reliably reach their true native fold. Atom-level simulation of folding needs supercomputers.
+**Real structures (Android app):** most presets come with their experimental structure from the Protein Data Bank. The Cα positions are baked in by `tools/extract_native.py`, which aligns each PDB chain to the UniProt-checked sequence and prints a coverage and identity report. With a structure, a structure-based ("Gō-model") layer steers folding toward it:
+- residue pairs that touch in the real structure attract, with a well centred on their real distance. Cutoffs are 7.5 Å for pairs close in sequence and 10 Å for distant pairs and pairs across chains, because packed helices sit 8–11 Å apart at their Cα atoms.
+- bond angles and twists are pulled toward their real values.
+- a weak long-range pull between residues on either side of a real interface. It stands in for the diffusion and electrostatic steering that bring partners together, which would take far too long to simulate.
+- complexes start dissociated, each chain unfolded around its real position, pushed 40% further out.
+
+The **Native-structure guidance** slider blends from generic physics (0%) to fully guided (100%, the default). The readout shows:
+- **native contacts (Q):** the share of the real structure's contacts that have formed.
+- **RMSD:** how far the shape is from the real one after the best superposition, in Å.
+
+Measured at desktop speed, starting from an unfolded chain:
+- **Small and medium proteins:** Trp-cage, chignolin, villin, ubiquitin and myoglobin usually reach their crystal structures (RMSD 1–3 Å) within 20–60 seconds. BPTI often does.
+- **Small complexes:** insulin's two chains and the GCN4 dimer assemble correctly within about 40 seconds.
+- **Larger proteins:** lysozyme, GFP and the hemoglobin tetramer take several minutes and can get stuck. For those, set "Heat to unfold every" to 5 minutes or Never.
+
+On a tablet everything runs slower than these figures.
+
+**Load any protein:** in **Create a protein…**, type:
+- a PDB ID, e.g. `1UBQ`
+- a PDB ID with chosen chains, e.g. `2HHB:A,B`
+- a UniProt ID for an AlphaFold prediction, e.g. `P69905`
+
+The app downloads the structure, reads its Cα trace (PDB or mmCIF), splits chains wherever residues are missing, and folds it toward that structure. The app only uses the internet for this.
+
+**Limits:** without a known structure (random proteins, typed-in sequences, amyloid-β) the generic physics collapses chains and forms helices and strands with the right trends, but won't reliably find the true fold. With a structure, the model folds toward a shape it was given; it doesn't predict one. The web version has neither.
 
 ## Proteins
 
