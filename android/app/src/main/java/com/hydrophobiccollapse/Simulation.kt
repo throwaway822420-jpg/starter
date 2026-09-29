@@ -52,8 +52,20 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         const val STRAND = 0xFF9FE3A8.toInt()
         const val BOND = 0xFF5D6784.toInt()
     }
-    // Backbone tints that tell chains apart when there are several
-    private val chainTints = intArrayOf(0xFF6F7FB0.toInt(), 0xFFB08A6F.toInt(), 0xFF6FB0A0.toInt(), 0xFFA97FB5.toInt(), 0xFFB0A66F.toInt(), 0xFF7FA6B5.toInt())
+    // Bold, distinct chain colours; one chain is coloured as a rainbow from N (blue) to C (red)
+    private val chainPalette = intArrayOf(0xFFFF6B6B.toInt(), 0xFF4DABF7.toInt(), 0xFFFFD43B.toInt(), 0xFF51CF66.toInt(),
+        0xFFCC5DE8.toInt(), 0xFFFF922B.toInt(), 0xFF22B8CF.toInt(), 0xFFF06595.toInt())
+    private var chainCol = IntArray(0)
+    private fun buildChainColours() {
+        val n = eng.n
+        chainCol = IntArray(n) { i ->
+            if (eng.nChains > 1) chainPalette[eng.chainOf[i] % chainPalette.size]
+            else android.graphics.Color.HSVToColor(floatArrayOf(240f * (1 - i / max(1f, n - 1f)), 0.62f, 1f))
+        }
+    }
+    private fun colourByChain() = when (settings.colorBy) { 1 -> false; 2 -> true; else -> eng.nChains > 1 }
+    /** The colour a residue is drawn in: its chemistry, or its chain. */
+    private fun drawColor(i: Int, byChain: Boolean) = if (byChain) chainCol[i] else residueColor(i)
     private fun withAlpha(c: Int, a: Float) = (c and 0xFFFFFF) or ((a.coerceIn(0f, 1f) * 255).roundToInt() shl 24)
     private fun mix(a: Int, b: Int, t: Float): Int {
         val r = ((a shr 16 and 255) + ((b shr 16 and 255) - (a shr 16 and 255)) * t).roundToInt()
@@ -127,7 +139,9 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         eng.load(protein)
         val n = eng.n
         px = FloatArray(n); py = FloatArray(n); pz = DoubleArray(n); pr = FloatArray(n); ps = FloatArray(n)
-        keys = LongArray(2 * n + 64)
+        keys = LongArray(n * CARTOON_SUB + n + 128)
+        buildChainColours()
+        allocCartoon(n)
         histLen = 0; bestE = 0.0; notes.clear(); measureAcc = 0.0
         for (k in 0..2) view[k] = eng.center[k]
         zoom = fitZoom()
@@ -296,54 +310,10 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         var zmin = Double.MAX_VALUE; var zmax = -Double.MAX_VALUE
         for (i in 0 until n) { zmin = min(zmin, pz[i]); zmax = max(zmax, pz[i]) }
         val zspan = max(1.0, zmax - zmin)
-        fun near(zv: Double) = ((zv - zmin) / zspan).toFloat()
-        fun fog(col: Int, zv: Double) = mix(Col.INK, col, 0.35f + 0.65f * near(zv))
 
-        // Hydrophobic contacts and salt bridges sit underneath everything
-        stroke.color = withAlpha(Col.HYDRO, 0.16f); stroke.strokeWidth = max(0.6f * density, (zoom * 0.18).toFloat())
-        val ca = eng.contacts.a; val cb = eng.contacts.b
-        var drawn = 0
-        for (p in 0 until eng.contacts.size) {
-            val i = ca[p]; val j = cb[p]
-            if (i < n && j < n && eng.seq[i] in hydrophobic && eng.seq[j] in hydrophobic) {
-                c.drawLine(px[i], py[i], px[j], py[j], stroke)
-                if (++drawn > 3000) break
-            }
-        }
-        dash.color = withAlpha(Col.TEXT, 0.35f)
-        for (b in eng.bridges) if (b[0] < n && b[1] < n) c.drawLine(px[b[0]], py[b[0]], px[b[1]], py[b[1]], dash)
-
-        // Depth-sorted backbone segments (id < n), disulfides (n..n+63) and residues (n+64…)
-        var m = 0
-        for (i in 0 until n - 1) if (eng.chainOf[i] == eng.chainOf[i + 1]) keys[m++] = depthKey((pz[i] + pz[i + 1]) / 2 - 0.01, i)
-        val ssList = eng.disulfides
-        for (k in 0 until min(ssList.size, 64)) { val d = ssList[k]; keys[m++] = depthKey((pz[d[0]] + pz[d[1]]) / 2 - 0.02, n + k) }
-        for (i in 0 until n) keys[m++] = depthKey(pz[i], n + 64 + i)
-        java.util.Arrays.sort(keys, 0, m)
-        val multi = eng.nChains > 1
-        for (k in 0 until m) {
-            val id = (keys[k] and 0xFFFFFFFFL).toInt()
-            when {
-                id < n -> {
-                    val i = id; val a = eng.ss[i]; val b = eng.ss[i + 1]
-                    val kind = if (a == b) a else 0
-                    val col = when (kind) { 1 -> Col.HELIX; 2 -> Col.STRAND; else -> if (multi) chainTints[eng.chainOf[i] % chainTints.size] else Col.BOND }
-                    val z = (pz[i] + pz[i + 1]) / 2
-                    stroke.color = fog(col, z)
-                    stroke.strokeWidth = (if (kind != 0) 1.3f else 0.55f) * (ps[i] + ps[i + 1]) / 2
-                    c.drawLine(px[i], py[i], px[i + 1], py[i + 1], stroke)
-                }
-                id < n + 64 -> {
-                    val d = ssList.getOrNull(id - n) ?: continue
-                    val i = d[0]; val j = d[1]
-                    if (i >= n || j >= n) continue
-                    stroke.color = withAlpha(fog(Col.SULFUR, (pz[i] + pz[j]) / 2), 0.95f)
-                    stroke.strokeWidth = 0.7f * (ps[i] + ps[j]) / 2
-                    c.drawLine(px[i], py[i], px[j], py[j], stroke)
-                }
-                else -> { val i = id - n - 64; drawResidue(c, i, fog(residueColor(i), pz[i]), near(pz[i]), big) }
-            }
-        }
+        zMin = zmin; zSpan = zspan
+        val byChain = colourByChain()
+        if (settings.viewStyle == 0) drawBeads(c, byChain, big) else drawCartoon(c, byChain, ribbons = settings.viewStyle == 1)
 
         // Reaction flashes: proton transfers (small rings) and disulfide chemistry (sulfur bursts)
         for (f in eng.flashes) {
@@ -353,7 +323,7 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
                 val k = (age / 1.2).toFloat()
                 stroke.color = withAlpha(Col.SULFUR, 0.8f * (1 - k)); stroke.strokeWidth = 2 * density
                 c.drawCircle(px[i], py[i], pr[i] + k * 30 * density, stroke)
-            } else if (age < 0.45 && !big && pr[i] > 3 * density) {
+            } else if (age < 0.45 && !big && settings.viewStyle == 0 && pr[i] > 3 * density) {
                 val k = (age / 0.45).toFloat()
                 stroke.color = withAlpha(if (f.kind == Flash.GAINED) Col.POS else Col.TEXT, 0.5f * (1 - k)); stroke.strokeWidth = 1.2f * density
                 c.drawCircle(px[i], py[i], pr[i] + (2 + k * 10) * density, stroke)
@@ -375,6 +345,220 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         }
 
         if (settings.hud) drawHud(c)
+    }
+
+    // Depth cueing: far things fade into the background
+    private var zMin = 0.0
+    private var zSpan = 1.0
+    private fun near(zv: Double) = ((zv - zMin) / zSpan).toFloat().coerceIn(0f, 1f)
+    private fun fog(col: Int, zv: Double) = mix(Col.INK, col, 0.35f + 0.65f * near(zv))
+
+    // ---------- Style 0: beads on a backbone ----------
+    private fun drawBeads(c: Canvas, byChain: Boolean, big: Boolean) {
+        val n = eng.n
+        // Hydrophobic contacts and salt bridges sit underneath everything
+        stroke.strokeCap = Paint.Cap.ROUND
+        stroke.color = withAlpha(Col.HYDRO, 0.16f); stroke.strokeWidth = max(0.6f * density, (zoom * 0.18).toFloat())
+        val ca = eng.contacts.a; val cb = eng.contacts.b
+        var drawn = 0
+        for (p in 0 until eng.contacts.size) {
+            val i = ca[p]; val j = cb[p]
+            if (i < n && j < n && eng.seq[i] in hydrophobic && eng.seq[j] in hydrophobic) {
+                c.drawLine(px[i], py[i], px[j], py[j], stroke)
+                if (++drawn > 3000) break
+            }
+        }
+        dash.color = withAlpha(Col.TEXT, 0.35f)
+        for (b in eng.bridges) if (b[0] < n && b[1] < n) c.drawLine(px[b[0]], py[b[0]], px[b[1]], py[b[1]], dash)
+
+        // Depth-sorted backbone segments (id < n), disulfides (n..n+63) and residues (n+64…)
+        var m = 0
+        for (i in 0 until n - 1) if (eng.chainOf[i] == eng.chainOf[i + 1]) keys[m++] = depthKey((pz[i] + pz[i + 1]) / 2 - 0.01, i)
+        val ssList = eng.disulfides
+        for (k in 0 until min(ssList.size, 64)) { val d = ssList[k]; keys[m++] = depthKey((pz[d[0]] + pz[d[1]]) / 2 - 0.02, n + k) }
+        for (i in 0 until n) keys[m++] = depthKey(pz[i], n + 64 + i)
+        java.util.Arrays.sort(keys, 0, m)
+        for (k in 0 until m) {
+            val id = (keys[k] and 0xFFFFFFFFL).toInt()
+            when {
+                id < n -> {
+                    val i = id; val a = eng.ss[i]; val b = eng.ss[i + 1]
+                    val kind = if (a == b) a else 0
+                    val col = if (byChain) chainCol[i] else when (kind) { 1 -> Col.HELIX; 2 -> Col.STRAND; else -> Col.BOND }
+                    stroke.color = fog(col, (pz[i] + pz[i + 1]) / 2)
+                    stroke.strokeWidth = (if (kind != 0) 1.3f else 0.55f) * (ps[i] + ps[i + 1]) / 2
+                    c.drawLine(px[i], py[i], px[i + 1], py[i + 1], stroke)
+                }
+                id < n + 64 -> drawDisulfide(c, ssList.getOrNull(id - n))
+                else -> { val i = id - n - 64; drawResidue(c, i, fog(drawColor(i, byChain), pz[i]), near(pz[i]), big) }
+            }
+        }
+    }
+
+    private fun drawDisulfide(c: Canvas, d: IntArray?) {
+        if (d == null || d[0] >= eng.n || d[1] >= eng.n) return
+        val i = d[0]; val j = d[1]
+        stroke.strokeCap = Paint.Cap.ROUND
+        stroke.color = withAlpha(fog(Col.SULFUR, (pz[i] + pz[j]) / 2), 0.95f)
+        stroke.strokeWidth = 0.7f * (ps[i] + ps[j]) / 2
+        c.drawLine(px[i], py[i], px[j], py[j], stroke)
+    }
+
+    // ---------- Styles 1 and 2: cartoon ribbons, or a plain backbone trace ----------
+    // A Catmull–Rom spline runs through the Cα atoms, CARTOON_SUB samples per residue. Each residue gets a
+    // "normal" pointing into the curve (toward a helix axis); the ribbon's width runs along tangent × normal,
+    // so helices twist into spirals and strands lie flat. Brightness follows how squarely a face points at you.
+    private val CARTOON_SUB get() = if (eng.n > 800) 2 else 5
+    private var spX = DoubleArray(0); private var spY = DoubleArray(0); private var spZ = DoubleArray(0)
+    private var spWx = DoubleArray(0); private var spWy = DoubleArray(0); private var spWz = DoubleArray(0)
+    private var spNx = DoubleArray(0); private var spNy = DoubleArray(0); private var spNz = DoubleArray(0)
+    private var spU = DoubleArray(0); private var spChain = IntArray(0)
+    private var resNx = DoubleArray(0); private var resNy = DoubleArray(0); private var resNz = DoubleArray(0)
+    private val quad = Path()
+    private fun allocCartoon(n: Int) {
+        val m = n * 5 + 8
+        spX = DoubleArray(m); spY = DoubleArray(m); spZ = DoubleArray(m)
+        spWx = DoubleArray(m); spWy = DoubleArray(m); spWz = DoubleArray(m)
+        spNx = DoubleArray(m); spNy = DoubleArray(m); spNz = DoubleArray(m)
+        spU = DoubleArray(m); spChain = IntArray(m)
+        resNx = DoubleArray(n); resNy = DoubleArray(n); resNz = DoubleArray(n)
+    }
+
+    private var tpx = 0f; private var tpy = 0f; private var tpz = 0.0; private var tps = 0f
+    private fun projectPoint(x: Double, y: Double, z: Double) {
+        val a = yaw + pageYaw; val cam = cam()
+        val cy = cos(a); val sy = sin(a); val cp = cos(pitch); val sp = sin(pitch)
+        val dx = x - view[0]; val dy = y - view[1]; val dz = z - view[2]
+        val x1 = cy * dx + sy * dz; val z1 = -sy * dx + cy * dz
+        val y2 = cp * dy - sp * z1; val z2 = sp * dy + cp * z1
+        val s = zoom * cam / max(cam - z2, cam * 0.2)
+        tpx = (w / 2 + x1 * s).toFloat(); tpy = (h / 2 + y2 * s).toFloat(); tpz = z2; tps = s.toFloat()
+    }
+    /** How squarely a direction points at the viewer, 0…1. */
+    private fun facing(vx: Double, vy: Double, vz: Double): Float {
+        val a = yaw + pageYaw
+        val z1 = -sin(a) * vx + cos(a) * vz
+        return abs(sin(pitch) * vy + cos(pitch) * z1).toFloat()
+    }
+
+    private fun buildSpline(): Int {
+        val n = eng.n; val x = eng.x; val y = eng.y; val z = eng.z; val ch = eng.chainOf
+        // Per-residue normals, pointing into the local curve; flipped along strands so the sheet doesn't twist
+        for (i in 0 until n) {
+            val a = if (i > 0 && ch[i - 1] == ch[i]) i - 1 else -1
+            val b = if (i < n - 1 && ch[i + 1] == ch[i]) i + 1 else -1
+            var nx = 0.0; var ny = 0.0; var nz = 0.0
+            if (a >= 0 && b >= 0) { nx = x[a] + x[b] - 2 * x[i]; ny = y[a] + y[b] - 2 * y[i]; nz = z[a] + z[b] - 2 * z[i] }
+            val len = sqrt(nx * nx + ny * ny + nz * nz)
+            if (len < 1e-6) { if (i > 0 && ch[i - 1] == ch[i]) { nx = resNx[i - 1]; ny = resNy[i - 1]; nz = resNz[i - 1] } else { nx = 0.0; ny = 1.0; nz = 0.0 } }
+            else { nx /= len; ny /= len; nz /= len }
+            if (i > 0 && ch[i - 1] == ch[i] && eng.ss[i] != 1 && nx * resNx[i - 1] + ny * resNy[i - 1] + nz * resNz[i - 1] < 0) { nx = -nx; ny = -ny; nz = -nz }
+            resNx[i] = nx; resNy[i] = ny; resNz[i] = nz
+        }
+        for (i in 0 until n) if (eng.chainStart.contains(i) && i + 1 < n && ch[i + 1] == ch[i]) { resNx[i] = resNx[i + 1]; resNy[i] = resNy[i + 1]; resNz[i] = resNz[i + 1] }
+        for (i in n - 1 downTo 1) if (ch[i - 1] == ch[i] && (i == n - 1 || ch[i + 1] != ch[i])) { resNx[i] = resNx[i - 1]; resNy[i] = resNy[i - 1]; resNz[i] = resNz[i - 1] }
+        // Samples along each chain
+        val sub = CARTOON_SUB
+        var m = 0
+        for (c0 in 0 until eng.nChains) {
+            val s0 = eng.chainStart[c0]; val s1 = eng.chainStart[c0 + 1] - 1
+            if (s1 <= s0) continue
+            for (i in s0 until s1) {
+                val i0 = max(s0, i - 1); val i2 = i + 1; val i3 = min(s1, i + 2)
+                val steps = if (i == s1 - 1) sub + 1 else sub
+                for (k in 0 until steps) {
+                    val t = k / sub.toDouble(); val t2 = t * t; val t3 = t2 * t
+                    // Catmull–Rom weights
+                    val w0 = -0.5 * t3 + t2 - 0.5 * t; val w1 = 1.5 * t3 - 2.5 * t2 + 1
+                    val w2 = -1.5 * t3 + 2 * t2 + 0.5 * t; val w3 = 0.5 * t3 - 0.5 * t2
+                    spX[m] = w0 * x[i0] + w1 * x[i] + w2 * x[i2] + w3 * x[i3]
+                    spY[m] = w0 * y[i0] + w1 * y[i] + w2 * y[i2] + w3 * y[i3]
+                    spZ[m] = w0 * z[i0] + w1 * z[i] + w2 * z[i2] + w3 * z[i3]
+                    var nx = (1 - t) * resNx[i] + t * resNx[i2]; var ny = (1 - t) * resNy[i] + t * resNy[i2]; var nz = (1 - t) * resNz[i] + t * resNz[i2]
+                    val nl = sqrt(nx * nx + ny * ny + nz * nz).coerceAtLeast(1e-9); nx /= nl; ny /= nl; nz /= nl
+                    val tx = x[i2] - x[i]; val ty = y[i2] - y[i]; val tz = z[i2] - z[i]
+                    var wx = ty * nz - tz * ny; var wy = tz * nx - tx * nz; var wz = tx * ny - ty * nx
+                    val wl = sqrt(wx * wx + wy * wy + wz * wz).coerceAtLeast(1e-9); wx /= wl; wy /= wl; wz /= wl
+                    spNx[m] = nx; spNy[m] = ny; spNz[m] = nz; spWx[m] = wx; spWy[m] = wy; spWz[m] = wz
+                    spU[m] = i + t; spChain[m] = c0
+                    m++
+                }
+            }
+        }
+        return m
+    }
+
+    /** Half-width of the ribbon at position u (in residues) for a segment starting at u0, Å; 0 means a thin tube. */
+    private fun halfWidth(u: Double, u0: Double): Double {
+        val i = (u0 + 0.5).toInt().coerceIn(0, eng.n - 1)   // the residue this segment belongs to
+        val kind = eng.ss[i]
+        return when (kind) {
+            1 -> 1.5
+            2 -> {
+                // Arrowhead over the last residue step of a strand
+                var e = i; while (e + 1 < eng.n && eng.ss[e + 1] == 2 && eng.chainOf[e + 1] == eng.chainOf[i]) e++
+                if (u0 >= e - 1 - 1e-6) 2.6 * (e - u).coerceIn(0.0, 1.0) + 0.1 else 1.5
+            }
+            else -> 0.0
+        }
+    }
+
+    private fun drawCartoon(c: Canvas, byChain: Boolean, ribbons: Boolean) {
+        val n = eng.n
+        val m = buildSpline()
+        // Depth-sort spline segments (id < m) and disulfides (m…m+63)
+        var cnt = 0
+        for (k in 0 until m - 1) {
+            if (spChain[k] != spChain[k + 1]) continue
+            projectPoint(spX[k], spY[k], spZ[k]); val z0 = tpz
+            projectPoint(spX[k + 1], spY[k + 1], spZ[k + 1])
+            keys[cnt++] = depthKey((z0 + tpz) / 2, k)
+        }
+        val ssList = eng.disulfides
+        for (k in 0 until min(ssList.size, 64)) { val d = ssList[k]; keys[cnt++] = depthKey((pz[d[0]] + pz[d[1]]) / 2 + 0.5, m + k) }
+        java.util.Arrays.sort(keys, 0, cnt)
+        for (q in 0 until cnt) {
+            val id = (keys[q] and 0xFFFFFFFFL).toInt()
+            if (id >= m) { drawDisulfide(c, ssList.getOrNull(id - m)); continue }
+            val k = id
+            val u0 = spU[k]; val u1 = spU[k + 1]
+            val res = (u0 + 0.5).toInt().coerceIn(0, n - 1)
+            val kind = if (ribbons) eng.ss[res] else 0
+            val base = if (byChain) chainCol[res] else when (kind) { 1 -> Col.HELIX; 2 -> Col.STRAND; else -> if (ribbons) Col.SPECIAL else residueColor(res) }
+            val hw0 = if (ribbons) halfWidth(u0, u0) else 0.0
+            val hw1 = if (ribbons) halfWidth(u1, u0) else 0.0
+            projectPoint(spX[k], spY[k], spZ[k]); val ax = tpx; val ay = tpy; val az = tpz; val aS = tps
+            projectPoint(spX[k + 1], spY[k + 1], spZ[k + 1]); val bx = tpx; val by = tpy; val bz = tpz; val bS = tps
+            val zc = (az + bz) / 2
+            if (hw0 == 0.0 && hw1 == 0.0) {
+                // Loops and the plain trace: a round tube
+                stroke.strokeCap = Paint.Cap.ROUND
+                stroke.color = fog(base, zc)
+                stroke.strokeWidth = (if (ribbons) 0.7f else 0.9f) * (aS + bS) / 2
+                c.drawLine(ax, ay, bx, by, stroke)
+                continue
+            }
+            // Ribbon quad between the two samples
+            projectPoint(spX[k] + spWx[k] * hw0, spY[k] + spWy[k] * hw0, spZ[k] + spWz[k] * hw0); val l0x = tpx; val l0y = tpy
+            projectPoint(spX[k] - spWx[k] * hw0, spY[k] - spWy[k] * hw0, spZ[k] - spWz[k] * hw0); val r0x = tpx; val r0y = tpy
+            projectPoint(spX[k + 1] + spWx[k + 1] * hw1, spY[k + 1] + spWy[k + 1] * hw1, spZ[k + 1] + spWz[k + 1] * hw1); val l1x = tpx; val l1y = tpy
+            projectPoint(spX[k + 1] - spWx[k + 1] * hw1, spY[k + 1] - spWy[k + 1] * hw1, spZ[k + 1] - spWz[k + 1] * hw1); val r1x = tpx; val r1y = tpy
+            val light = 0.45f + 0.55f * facing(spNx[k], spNy[k], spNz[k])
+            fill.color = mix(Col.INK, fog(base, zc), light)
+            quad.reset(); quad.moveTo(l0x, l0y); quad.lineTo(l1x, l1y); quad.lineTo(r1x, r1y); quad.lineTo(r0x, r0y); quad.close()
+            c.drawPath(quad, fill)
+            // A fine outline on the edges keeps thin, edge-on ribbons visible
+            stroke.strokeCap = Paint.Cap.BUTT; stroke.strokeWidth = 0.7f * density
+            stroke.color = fog(base, zc)
+            c.drawLine(l0x, l0y, l1x, l1y, stroke); c.drawLine(r0x, r0y, r1x, r1y, stroke)
+        }
+        stroke.strokeCap = Paint.Cap.ROUND
+        // The residue being pulled
+        val g = eng.grab
+        if (g in 0 until n) {
+            stroke.color = withAlpha(Col.TEXT, 0.7f); stroke.strokeWidth = 1.5f * density
+            c.drawCircle(px[g], py[g], 6 * density, stroke)
+        }
     }
 
     private fun drawResidue(c: Canvas, i: Int, col: Int, nearness: Float, big: Boolean) {

@@ -105,6 +105,17 @@ The web version (`index.html`) has the original six proteins and doesn't have th
 
 ## On screen
 
+**Views (Android app, in settings under View):**
+- **Style:**
+  - **Beads** draws every residue.
+  - **Cartoon** draws a smooth spline through the backbone. Helices become twisting ribbons that read as spirals, strands become flat arrows, and loops become thin tubes. Each ribbon is oriented from the local Cα geometry and shaded by which way it faces.
+  - **Backbone trace** is just the tube.
+- **Colour by:**
+  - **Chemistry** uses the colours below.
+  - **Chain** colours each chain, beads included, in one of eight bold colours. A single chain gets the rainbow from blue (N-terminus) to red (C-terminus) that structure viewers use.
+  - **Auto** (the default) picks chains when there are several.
+
+
 - **Residue colours:**
   - amber: hydrophobic
   - teal: polar

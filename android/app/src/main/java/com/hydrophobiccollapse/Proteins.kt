@@ -274,6 +274,10 @@ data class Settings(
     val customJson: String = "[]",
     val nativeBias: Float = 1f,
     val crowding: Int = 2,
+    /** 0 auto (chains when there are several), 1 chemistry, 2 chain */
+    val colorBy: Int = 0,
+    /** 0 beads, 1 cartoon, 2 backbone trace */
+    val viewStyle: Int = 0,
 ) {
     fun save(p: SharedPreferences) {
         p.edit()
@@ -282,6 +286,7 @@ data class Settings(
             .putBoolean("hud", hud).putBoolean("saver", saver)
             .putInt("randomLength", randomLength).putInt("randomStyle", randomStyle).putBoolean("randomOnWake", randomOnWake)
             .putString("customJson", customJson).putFloat("nativeBias", nativeBias).putInt("crowding", crowding)
+            .putInt("colorBy", colorBy).putInt("viewStyle", viewStyle)
             .apply()
     }
 
@@ -310,6 +315,8 @@ data class Settings(
                 customJson = p.getString("customJson", d.customJson) ?: d.customJson,
                 nativeBias = p.getFloat("nativeBias", d.nativeBias),
                 crowding = p.getInt("crowding", d.crowding),
+                colorBy = p.getInt("colorBy", d.colorBy),
+                viewStyle = p.getInt("viewStyle", d.viewStyle),
             )
         }
 

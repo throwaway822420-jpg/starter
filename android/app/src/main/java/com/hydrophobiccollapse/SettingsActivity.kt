@@ -134,6 +134,16 @@ class SettingsActivity : Activity() {
             if (idx != s.crowding) update(s.copy(crowding = idx))
         }, margins(top = 4))
 
+        col.addView(section("View"))
+        col.addView(label("Style"), margins(top = 6))
+        col.addView(spinner(listOf("Beads: every residue", "Cartoon: helix spirals, strand arrows", "Backbone trace"), s.viewStyle.coerceIn(0, 2)) { idx ->
+            if (idx != s.viewStyle) update(s.copy(viewStyle = idx))
+        }, margins(top = 4))
+        col.addView(label("Colour by"), margins(top = 10))
+        col.addView(spinner(listOf("Auto: chains if several, else chemistry", "Chemistry", "Chain (one chain: rainbow N → C)"), s.colorBy.coerceIn(0, 2)) { idx ->
+            if (idx != s.colorBy) update(s.copy(colorBy = idx))
+        }, margins(top = 4))
+
         col.addView(section("Playback"))
         col.addView(slider("Simulation speed", 0.25f, 3f, 0.25f, s.speed, { "${it}×" }) { update(s.copy(speed = it)) })
         col.addView(label("Heat to unfold every"), margins(top = 10))

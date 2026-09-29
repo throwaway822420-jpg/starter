@@ -53,6 +53,16 @@ class RenderSnapshotTest {
     fun ubiquitinGuidedFrame() = frame("ubiquitin-guided.png", Settings(protein = "ubq", hud = true), 40)
 
     @Test
+    fun cartoonFrames() {
+        frame("cartoon-ubiquitin.png", Settings(protein = "ubq", viewStyle = 1), 40)
+        frame("cartoon-ubiquitin-rainbow.png", Settings(protein = "ubq", viewStyle = 1, colorBy = 2), 40)
+        frame("cartoon-myoglobin.png", Settings(protein = "myoglobin", viewStyle = 1, colorBy = 2), 60)
+        frame("cartoon-hemoglobin.png", Settings(protein = "hemoglobin", viewStyle = 1), 60)
+        frame("beads-gcn4-chains.png", Settings(protein = "gcn4"), 30)
+        frame("trace-lysozyme.png", Settings(protein = "lysozyme", viewStyle = 2, colorBy = 2), 30)
+    }
+
+    @Test
     fun hemoglobinFrame() = frame("hemoglobin.png", Settings(protein = "hemoglobin", hud = true), 20)
 
     @Test
