@@ -128,6 +128,7 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         eng.pH = s.ph.toDouble(); eng.saltMM = s.salt.toDouble(); eng.redox = s.redox.toDouble()
         eng.nativeBias = s.nativeBias.toDouble()
         eng.crowding = s.crowding
+        eng.assist = s.assist; eng.urea = s.urea.toDouble(); eng.pullPN = s.pullPN.toDouble()
         val reload = when {
             !loaded -> true
             s.protein == Proteins.RANDOM_ID -> old.protein != s.protein || old.randomLength != s.randomLength || old.randomStyle != s.randomStyle
@@ -157,6 +158,7 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         // Progress is measured from this unfolded start
         q0 = if (eng.q.isNaN()) 0.0 else min(eng.q, 0.6); r0 = if (eng.rmsd.isNaN()) 20.0 else max(eng.rmsd, 6.0); rg0 = eng.rg
         progress = 0.0; foldedNoted = false; foldStart = eng.time
+        funLen = 0; funHead = 0; selected = -1; selectedInfo = null
         takeSnapshot()
         loaded = true
     }
@@ -205,6 +207,22 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
             } finally { lock.unlock() }
         }
     }
+
+    // ---------- Residue inspector: tap a residue to see what it is and what it is doing ----------
+    var selected = -1; private set
+    private var selectedAt = 0.0
+    private var selectedInfo: ProteinEngine.ResidueInfo? = null
+    private fun select(i: Int) {
+        selected = if (i == selected) -1 else i
+        selectedAt = clock
+        selectedInfo = if (selected >= 0) eng.residueInfo(selected) else null
+    }
+    /** For tests and the settings screen: select a residue directly. */
+    fun selectResidue(i: Int) = lock.withLock { selected = -1; select(i) }
+
+    // ---------- Folding funnel: energy against native contacts, the classic picture of folding ----------
+    private val funQ = FloatArray(480); private val funE = FloatArray(480)
+    private var funLen = 0; private var funHead = 0
 
     // ---------- Folding progress ----------
     // With a known structure: native contacts formed and closeness to it (RMSD), both measured from the
@@ -351,12 +369,20 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         pageYaw += (pageYawTarget - pageYaw) * min(1.0, dt * 4)
         updateSolvent(dt)
         takeSnapshot()
+        if (selected >= 0) {
+            if (selected >= eng.n || (wallpaperMode && clock - selectedAt > 12)) { selected = -1; selectedInfo = null }
+            else if (hudAcc == 0.0 || measureAcc == 0.0) selectedInfo = eng.residueInfo(selected)
+        }
         hudAcc += dt
         if (hudAcc >= 0.25) {
             hudAcc = 0.0
             if (histLen < hist.size) hist[histLen++] = eng.energy.toFloat()
             else { System.arraycopy(hist, 1, hist, 0, hist.size - 1); hist[hist.size - 1] = eng.energy.toFloat() }
             if (eng.energy < bestE) bestE = eng.energy
+            if (eng.hasStructure && !eng.q.isNaN()) {
+                funQ[funHead] = eng.q.toFloat(); funE[funHead] = eng.energy.toFloat()
+                funHead = (funHead + 1) % funQ.size; if (funLen < funQ.size) funLen++
+            }
         }
     }
 
@@ -443,8 +469,96 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
             if (eng.chainStart[ch + 1] - s0 > 1) label(s0, s0 + 1, eng.chainLetter(ch).toString())
         }
 
+        drawPull(c)
+        if (selected in 0 until n) {
+            stroke.color = withAlpha(Col.TEXT, 0.9f); stroke.strokeWidth = 2 * density
+            c.drawCircle(px[selected], py[selected], max(pr[selected], 4 * density) + 6 * density, stroke)
+        }
         if (settings.hud) drawHud(c)
         if (settings.showProgress) drawProgress(c)
+        selectedInfo?.let { if (selected in 0 until n) drawInspector(c, it) }
+    }
+
+    /** Optical tweezers: arrows on the two pulled ends, and how far apart they are. */
+    private fun drawPull(c: Canvas) {
+        val n = eng.n
+        if (settings.pullPN <= 0 || n < 2) return
+        val a = 0; val b = n - 1
+        val dx = px[b] - px[a]; val dy = py[b] - py[a]; val len = max(1f, hypot(dx, dy))
+        val ux = dx / len; val uy = dy / len
+        stroke.color = Col.SULFUR; stroke.strokeWidth = 2.5f * density; stroke.strokeCap = Paint.Cap.ROUND
+        fun arrow(x0: Float, y0: Float, sx: Float, sy: Float) {
+            val l = 34 * density; val x1 = x0 + sx * l; val y1 = y0 + sy * l
+            c.drawLine(x0 + sx * 8 * density, y0 + sy * 8 * density, x1, y1, stroke)
+            val hx = -sy; val hy = sx; val hl = 8 * density
+            c.drawLine(x1, y1, x1 - sx * hl + hx * hl * 0.6f, y1 - sy * hl + hy * hl * 0.6f, stroke)
+            c.drawLine(x1, y1, x1 - sx * hl - hx * hl * 0.6f, y1 - sy * hl - hy * hl * 0.6f, stroke)
+        }
+        arrow(px[b], py[b], ux, uy); arrow(px[a], py[a], -ux, -uy)
+        text.typeface = mono; text.textSize = dp(11f); text.color = Col.SULFUR; text.textAlign = Paint.Align.CENTER
+        c.drawText("${settings.pullPN.roundToInt()} pN · ends ${eng.endToEnd.roundToInt()} Å apart", px[b] + ux * 50 * density, py[b] + uy * 50 * density + dp(14f), text)
+        text.textAlign = Paint.Align.LEFT
+    }
+
+    private fun residueClass(aa: Char, q: Double) = when {
+        aa == 'C' -> "Cysteine: can form disulfide bonds"
+        aa == 'G' -> "Glycine: the smallest, most flexible"
+        aa == 'P' -> "Proline: rigid, breaks helices"
+        q > 0.5 -> "Positively charged (basic)"
+        q < -0.5 -> "Negatively charged (acidic)"
+        aa in "DE" -> "Acidic, neutral right now"
+        aa in "KRH" -> "Basic, neutral right now"
+        aa in hydrophobic -> "Hydrophobic: avoids water"
+        else -> "Polar: likes water"
+    }
+
+    /** The inspector card for the tapped residue. */
+    private fun drawInspector(c: Canvas, info: ProteinEngine.ResidueInfo) {
+        val lines = ArrayList<String>()
+        lines += residueClass(info.aa, info.charge)
+        val qTxt = when { info.charge > 0.5 -> "Charge +1"; info.charge < -0.5 -> "Charge −1"; else -> "No charge" }
+        lines += if (info.pKa != null) "$qTxt · pKa ${"%.1f".format(info.pKa)}, ${if (info.protonated == true) "protonated" else "deprotonated"}" else qTxt
+        lines += when (info.ss) { 1 -> "In a helix"; 2 -> "In a β-strand"; else -> "In a loop" }
+        lines += when {
+            info.contacts >= 5 -> "Buried: ${info.contacts} contacts"
+            info.contacts >= 2 -> "Partly buried: ${info.contacts} contacts"
+            else -> "Exposed to water"
+        }
+        if (info.partner >= 0) lines += "Disulfide with ${eng.residueLabel(info.partner)}"
+        if (info.nativeTotal > 0) lines += "Real-structure contacts: ${info.nativeFormed} of ${info.nativeTotal}"
+        val pw = min(dp(250f), w - dp(32f)); val lh = dp(17f)
+        val ph = dp(14f) + dp(22f) + lines.size * lh + dp(10f)
+        val x0 = w - pw - dp(16f)
+        val y0 = h - bottomInset - (if (wallpaperMode) dp(110f) else dp(16f)) - ph
+        fill.color = Col.PANEL; c.drawRoundRect(x0, y0, x0 + pw, y0 + ph, dp(10f), dp(10f), fill)
+        stroke.color = Col.LINE; stroke.strokeWidth = density; c.drawRoundRect(x0, y0, x0 + pw, y0 + ph, dp(10f), dp(10f), stroke)
+        fill.color = residueColor(selected); c.drawCircle(x0 + dp(20f), y0 + dp(22f), dp(6f), fill)
+        text.textAlign = Paint.Align.LEFT; text.typeface = sansBold; text.textSize = dp(15f); text.color = Col.TEXT
+        c.drawText(info.label, x0 + dp(34f), y0 + dp(27f), text)
+        text.typeface = sans; text.textSize = dp(12f); text.color = Col.HAZE
+        for ((k, l) in lines.withIndex()) c.drawText(ellipsize(l, pw - dp(28f)), x0 + dp(14f), y0 + dp(36f) + (k + 1) * lh - dp(4f), text)
+    }
+
+    /** Energy against native contacts: an unfolded chain sits high on the left, the folded protein low on the right. */
+    private fun drawFunnel(c: Canvas, x: Float, y: Float, fw: Float, fh: Float) {
+        stroke.color = Col.LINE; stroke.strokeWidth = density
+        c.drawLine(x, y + fh, x + fw, y + fh, stroke); c.drawLine(x, y, x, y + fh, stroke)
+        if (funLen < 2) return
+        var lo = Float.MAX_VALUE; var hi = -Float.MAX_VALUE
+        for (k in 0 until funLen) { lo = min(lo, funE[k]); hi = max(hi, funE[k]) }
+        if (hi - lo < 5) hi = lo + 5
+        val pad = dp(3f)
+        for (k in 0 until funLen) {
+            val idx = (funHead - funLen + k + funQ.size) % funQ.size
+            val age = k / funLen.toFloat()                        // 0 oldest … 1 newest
+            val px0 = x + pad + funQ[idx].coerceIn(0f, 1f) * (fw - 2 * pad)
+            val py0 = y + pad + (hi - funE[idx]) / (hi - lo) * (fh - 2 * pad)   // high energy at the top
+            fill.color = withAlpha(mix(Col.POLAR, Col.HYDRO, age), 0.15f + 0.6f * age)
+            c.drawCircle(px0, py0, dp(1.6f), fill)
+        }
+        val last = (funHead - 1 + funQ.size) % funQ.size
+        fill.color = Col.HYDRO
+        c.drawCircle(x + pad + funQ[last].coerceIn(0f, 1f) * (fw - 2 * pad), y + pad + (hi - funE[last]) / (hi - lo) * (fh - 2 * pad), dp(3.5f), fill)
     }
 
     /** A small bar at the top: how close to folded (or, without a known structure, to collapsed). */
@@ -455,7 +569,7 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         stroke.color = Col.LINE; stroke.strokeWidth = density; c.drawRoundRect(x0, y0, x0 + pw, y0 + ph, dp(9f), dp(9f), stroke)
         val pct = (progress * 100).roundToInt()
         text.textAlign = Paint.Align.LEFT; text.typeface = sans; text.textSize = dp(11f); text.color = Col.HAZE; text.letterSpacing = 0.04f
-        c.drawText(if (progressIsFolding) "Folded" else "Collapsed", x0 + dp(12f), y0 + dp(15f), text)
+        c.drawText((if (progressIsFolding) "Folded" else "Collapsed") + (if (settings.assist > 0) " · assisted" else ""), x0 + dp(12f), y0 + dp(15f), text)
         text.letterSpacing = 0f
         text.textAlign = Paint.Align.RIGHT; text.typeface = mono; text.textSize = dp(12f); text.color = Col.TEXT
         c.drawText("$pct %", x0 + pw - dp(12f), y0 + dp(15f), text)
@@ -728,7 +842,7 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         val statRows = 2 + (if (multi) 1 else 0) + (if (structured) 1 else 0)
         val events = mergedEvents()
         val height = pad + dp(30f) + dp(14f) + seqLines * dp(15f) + (if (truncated) dp(14f) else 0f) + dp(12f) +
-            statRows * dp(40f) + dp(4f) + dp(62f) + events.size * dp(14f) + pad
+            statRows * dp(40f) + dp(4f) + dp(62f) + (if (structured) dp(92f) else 0f) + events.size * dp(14f) + pad
         val x0 = dp(16f)
         val bottom = h - bottomInset - (if (wallpaperMode) dp(110f) else dp(16f))
         val y0 = max(dp(16f), bottom - height)
@@ -744,7 +858,8 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         text.typeface = sansBold; text.textSize = dp(15f); text.color = Col.TEXT
         c.drawText(phase.label, left + dp(16f), y + dp(15f), text)
         text.typeface = mono; text.textSize = dp(10.5f); text.color = Col.HAZE; text.textAlign = Paint.Align.RIGHT
-        c.drawText("${temperature.roundToInt()} K · pH ${"%.1f".format(settings.ph)} · ${settings.salt} mM", left + inner, y + dp(14f), text)
+        val ureaTxt = if (settings.urea > 0) " · ${"%.1f".format(settings.urea)} M urea" else ""
+        c.drawText("${temperature.roundToInt()} K · pH ${"%.1f".format(settings.ph)} · ${settings.salt} mM$ureaTxt", left + inner, y + dp(14f), text)
         text.textAlign = Paint.Align.LEFT
         y += dp(30f)
 
@@ -814,6 +929,12 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         val rate = if (eng.n > 300 || physicsThread != null) " · ${(stepsPerSecond / 1000).let { "%.1f".format(it) }}k steps/s" else ""
         c.drawText("Energy, last 60 s$rate", left, y + dp(52f), text)
         y += dp(62f)
+        if (structured) {
+            drawFunnel(c, left, y, inner, dp(68f))
+            text.typeface = mono; text.textSize = dp(9f); text.color = Col.HAZE; text.textAlign = Paint.Align.LEFT
+            c.drawText("Folding funnel: energy vs native contacts (0 → 1)", left, y + dp(82f), text)
+            y += dp(92f)
+        }
 
         // Newest events
         text.textSize = dp(10f)
@@ -903,7 +1024,9 @@ class Simulation(private val density: Float, private val wallpaperMode: Boolean)
         return true
     }
     private fun tap(x: Float, y: Float, time: Long) {
-        if (eng.grab < 0) {
+        if (eng.grab >= 0) select(eng.grab)
+        else {
+            if (selected >= 0) { selected = -1; selectedInfo = null }
             ripples.add(doubleArrayOf(x.toDouble(), y.toDouble(), clock))
             unproject(x, y, 0.0, tmp)
             eng.kick(tmp[0], tmp[1], tmp[2], 14.0, 2.5)

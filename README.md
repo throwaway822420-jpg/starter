@@ -80,6 +80,31 @@ The app downloads the structure, reads its Cα trace (PDB or mmCIF), splits chai
 
 **Limits:** without a known structure (random proteins, typed-in sequences, amyloid-β) the generic physics collapses chains and forms helices and strands with the right trends, but won't reliably find the true fold. With a structure, the model folds toward a shape it was given; it doesn't predict one. The web version has neither.
 
+## Experiments and extras (Android app)
+
+- **Folding assist (the cheat):** Off, Gentle, Strong or Maximum. With a known structure, the real structure is laid over the chain every 20 steps (best superposition), and each residue is pulled toward its spot. Because the target follows the chain's position and orientation, it only pushes toward the right shape. Without a structure, it squeezes the chain toward its centre and makes contacts stickier. The progress bar says "assisted" while it's on.
+
+  Median over three runs from an unfolded chain, desktop speed:
+
+  | Protein | No assist | Gentle | Strong | Maximum |
+  | --- | --- | --- | --- | --- |
+  | Myoglobin | ~30 s | 4 s | 2 s | 2 s |
+  | Lysozyme | didn't fold in 40 s | didn't fold in 40 s (closer) | 4 s | 2 s |
+  | Hemoglobin tetramer | — | — | — | 10 s |
+
+  Strengthening native contacts instead was tried and made folding slower, so the assist is purely the pull.
+
+- **Tap a residue to inspect it:**
+  - its type and what that means
+  - its charge, pKa and protonation state
+  - helix, strand or loop
+  - how buried it is
+  - its disulfide partner
+  - how many of its real-structure contacts have formed
+- **Folding funnel:** with a known structure, the readout plots energy against the fraction of native contacts. An unfolded chain starts high on the left and slides down to the folded state at the bottom right, the classic picture from folding theory.
+- **Urea:** a chemical denaturant, 0–8 M. It weakens every attractive contact by 6% per molar, roughly like measured m-values. At 8 M, ubiquitin falls from about 80% of native contacts to about 40%.
+- **Optical tweezers:** a constant force (0–300 pN) pulls the first and last residues apart, with arrows and a live end-to-end distance. The sphere widens so the chain can reach full length. At 200 pN ubiquitin unfolds and stretches to about 225 Å, in line with the 100–300 pN range where single-molecule experiments unfold proteins.
+
 ## Proteins
 
 The app has these presets. Natural sequences are checked against UniProt.

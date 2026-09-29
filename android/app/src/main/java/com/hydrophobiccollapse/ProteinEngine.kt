@@ -73,6 +73,13 @@ private const val K3_DIH_NAT = 0.625
 // and electrostatic steering that bring partners together in reality, which would take far too long to simulate.
 private const val EPS_DOCK = 0.2
 private const val W_DOCK = 6.0
+// Experiments and the folding assist ("cheat")
+private const val UREA_M = 0.06            // urea weakens attractive contacts by 6 % per molar, roughly like measured m-values
+private const val PN = 0.01439             // 1 piconewton in kcal/(mol·Å)
+private val ASSIST_TARGET_K = doubleArrayOf(0.0, 0.03, 0.1, 0.4)    // kcal/(mol·Å²) toward the superposed real structure
+private val ASSIST_SQUEEZE_K = doubleArrayOf(0.0, 0.004, 0.015, 0.05) // toward the centre, when no structure is known
+private val ASSIST_STICKY = doubleArrayOf(0.0, 0.25, 0.6, 1.0)      // extra contact stickiness, when no structure is known
+private const val ASSIST_EVERY = 20        // steps between re-superposing the target
 private const val DISSOCIATE = 1.4       // complexes start with each chain this much further from the centre than in the real structure
 
 const val AMINO_ACIDS = "ARNDCQEGHILKMFPSTWYV"
@@ -202,6 +209,18 @@ class ProteinEngine {
     var interfaceContacts = 0; private set     // contacts between different chains
     var largestComplex = 1; private set        // chains in the biggest group held together by contacts or disulfides
 
+    /** Folding assist ("cheat"), 0 off … 3 maximum. Pulls toward the real structure, or squeezes and sticks without one. */
+    var assist = 0
+        set(v) { field = v.coerceIn(0, 3); targetsValid = false }
+    /** Urea concentration, M. Weakens every attractive contact. */
+    var urea = 0.0
+    /** Force pulling the two ends of the protein apart, piconewtons (optical tweezers). */
+    var pullPN = 0.0
+    /** Distance between the pulled ends, Å (updated by measure()). */
+    var endToEnd = 0.0; private set
+    private var tgX = DoubleArray(0); private var tgY = DoubleArray(0); private var tgZ = DoubleArray(0)
+    private var targetsValid = false
+
     // Known structure (PDB or AlphaFold) and how strongly to steer toward it, 0…1
     var nativeBias = 1.0
     var structureSource: String? = null; private set
@@ -292,6 +311,7 @@ class ProteinEngine {
         charged = IntArray(n)
         rBox = boxRadius()
         loadStructure(protein)
+        tgX = DoubleArray(n); tgY = DoubleArray(n); tgZ = DoubleArray(n); targetsValid = false
         events.clear(); flashes.clear(); time = 0.0; stepCount = 0
         grab = -1
         unfoldCoords()
@@ -493,6 +513,9 @@ class ProteinEngine {
         fx.fill(0.0); fy.fill(0.0); fz.fill(0.0)
         var eBond = 0.0; var eLocal = 0.0; var eContact = 0.0; var eElec = 0.0
         val lam = if (nNat > 0) nativeBias.coerceIn(0.0, 1.0) else 0.0
+        val soften = (1 - UREA_M * urea).coerceIn(0.2, 1.0)
+        val sticky = if (nNat == 0) 1 + ASSIST_STICKY[assist] else 1.0
+        attractScale = soften * sticky
         if (measure) contacts.clear()
 
         // Bonds (within a chain)
@@ -524,7 +547,7 @@ class ProteinEngine {
             val gw = if (t0.isNaN()) 1.0 else 1 - lam   // generic preferences give way to the known structure
             val gh = exp(-(th - THETA_HELIX) * (th - THETA_HELIX) / (2 * W_THETA_H * W_THETA_H)) * A_HELIX_ANGLE * wAngH[i] * gw
             val gs = exp(-(th - THETA_STRAND) * (th - THETA_STRAND) / (2 * W_THETA_S * W_THETA_S)) * A_STRAND_ANGLE * wAngS[i] * gw
-            if (!t0.isNaN() && lam > 0) { val d = th - t0; u += lam * K_ANG_NAT * d * d; dU += 2 * lam * K_ANG_NAT * d }
+            if (!t0.isNaN() && lam > 0) { val ka = lam * K_ANG_NAT; val d = th - t0; u += ka * d * d; dU += 2 * ka * d }
             u -= gh + gs
             dU += gh * (th - THETA_HELIX) / (W_THETA_H * W_THETA_H) + gs * (th - THETA_STRAND) / (W_THETA_S * W_THETA_S)
             val g = dU / s
@@ -585,7 +608,7 @@ class ProteinEngine {
             val r = sqrt(dx * dx + dy * dy + dz * dz).coerceAtLeast(1e-6)
             val d = r - R_HB
             if (abs(d) > 4 * W_HB) continue
-            val g = H_BOND * wHB[i] * exp(-(d * d) / (2 * W_HB * W_HB)) * (if (hasNat[i] && hasNat[j]) 1 - lam else 1.0)
+            val g = H_BOND * wHB[i] * exp(-(d * d) / (2 * W_HB * W_HB)) * (if (hasNat[i] && hasNat[j]) 1 - lam else 1.0) * soften
             val f = -(g * d / (W_HB * W_HB)) / r
             fx[i] += f * dx; fy[i] += f * dy; fz[i] += f * dz
             fx[j] -= f * dx; fy[j] -= f * dy; fz[j] -= f * dz
@@ -597,7 +620,7 @@ class ProteinEngine {
 
         // Structure-based contacts: a 12–10 well centred on each pair's distance in the real structure
         if (lam > 0) {
-            val epsN = lam * EPS_NATIVE
+            val epsN = lam * EPS_NATIVE * soften
             val c2 = 1 / (NAT_CUT * NAT_CUT); val c10 = c2 * c2 * c2 * c2 * c2; val c12 = c10 * c2
             val shift = 5 * c12 - 6 * c10
             for (k in 0 until nNat) {
@@ -607,7 +630,7 @@ class ProteinEngine {
                 if (chainOf[i] != chainOf[j]) {
                     val r = sqrt(r2).coerceAtLeast(1e-6); val d = r - r0
                     if (d < 4 * W_DOCK) {
-                        val g = lam * EPS_DOCK * exp(-d * d / (2 * W_DOCK * W_DOCK))
+                        val g = lam * EPS_DOCK * soften * exp(-d * d / (2 * W_DOCK * W_DOCK))
                         val f = -(g * d / (W_DOCK * W_DOCK)) / r
                         fx[i] += f * dx; fy[i] += f * dy; fz[i] += f * dz
                         fx[j] -= f * dx; fy[j] -= f * dy; fz[j] -= f * dz
@@ -664,16 +687,40 @@ class ProteinEngine {
         for (i in 0 until n) { cx += x[i]; cy += y[i]; cz += z[i] }
         cx /= n; cy /= n; cz /= n
         var eBox = 0.0
+        // While the ends are pulled, give the chain room to stretch to its full length
+        val rb = if (pullPN > 0) max(rBox, 0.5 * R_BOND * n + 10) else rBox
         for (i in 0 until n) {
             fx[i] -= 0.01 * cx; fy[i] -= 0.01 * cy; fz[i] -= 0.01 * cz
             val r = sqrt(x[i] * x[i] + y[i] * y[i] + z[i] * z[i])
-            if (r > rBox) {
-                val f = -min(5 * (r - rBox), FMAX) / r
+            if (r > rb) {
+                val f = -min(5 * (r - rb), FMAX) / r
                 fx[i] += f * x[i]; fy[i] += f * y[i]; fz[i] += f * z[i]
-                if (measure) { val d = r - rBox; val dc = FMAX / 5; eBox += if (d < dc) 2.5 * d * d else 2.5 * dc * dc + FMAX * (d - dc) }
+                if (measure) { val d = r - rb; val dc = FMAX / 5; eBox += if (d < dc) 2.5 * d * d else 2.5 * dc * dc + FMAX * (d - dc) }
             }
         }
         if (measure) eBox += 0.005 * n * (cx * cx + cy * cy + cz * cz)
+
+        // Folding assist: pull toward the superposed real structure, or squeeze toward the centre without one
+        if (assist > 0) {
+            if (nNat > 0) {
+                if (!targetsValid) updateTargets()
+                val k = ASSIST_TARGET_K[assist]
+                for (i in 0 until n) if (hasNat[i]) { fx[i] += k * (tgX[i] - x[i]); fy[i] += k * (tgY[i] - y[i]); fz[i] += k * (tgZ[i] - z[i]) }
+            } else {
+                val k = ASSIST_SQUEEZE_K[assist]
+                for (i in 0 until n) { fx[i] -= k * (x[i] - cx); fy[i] -= k * (y[i] - cy); fz[i] -= k * (z[i] - cz) }
+            }
+        }
+
+        // Optical tweezers: a constant force pulling the first and last residues apart
+        if (pullPN > 0 && n >= 2) {
+            val a = 0; val b = n - 1
+            val dx = x[b] - x[a]; val dy = y[b] - y[a]; val dz = z[b] - z[a]
+            val d = sqrt(dx * dx + dy * dy + dz * dz).coerceAtLeast(1e-6)
+            val f = pullPN * PN / d
+            fx[b] += f * dx; fy[b] += f * dy; fz[b] += f * dz
+            fx[a] -= f * dx; fy[a] -= f * dy; fz[a] -= f * dz
+        }
 
         // A finger pulling one residue
         val g = grab
@@ -692,6 +739,7 @@ class ProteinEngine {
     }
 
     /** Pair contact forces for shortPairs[p0, p1) into the given arrays; returns the contact energy when measuring. */
+    private var attractScale = 1.0
     private fun contactRange(p0: Int, p1: Int, ox: DoubleArray, oy: DoubleArray, oz: DoubleArray, lam: Double, measure: Boolean): Double {
         val x = x; val y = y; val z = z
         val sc = 1 / LJ_CUT.pow(6)
@@ -709,7 +757,7 @@ class ProteinEngine {
                 // With a known structure, native pairs hand over to the native term and other contacts weaken
                 val w = if (lam == 0.0) 1.0 else if (nat[p]) 1 - lam
                         else if (hasNat[i] && hasNat[j] && natGroup[i] == natGroup[j]) 1 - 0.8 * lam else 1.0
-                ep = EPS20[type[i] * 20 + type[j]] * w
+                ep = EPS20[type[i] * 20 + type[j]] * w * attractScale
             }
             if (r2 >= cut2) continue
             if (r2 < 1) r2 = 1.0
@@ -849,6 +897,7 @@ class ProteinEngine {
             }
             stepCount++
             if (stepCount % MC_EVERY == 0L) chemistry()
+            if (assist > 0 && stepCount % ASSIST_EVERY == 0L) targetsValid = false
         }
     }
     fun advanceClock(dt: Double) { time += dt }
@@ -912,6 +961,7 @@ class ProteinEngine {
             for (c in 0 until nChains) size[find(c)]++
             largestComplex = size.max()
         } else largestComplex = 1
+        endToEnd = if (n >= 2) dist(0, n - 1) else 0.0
         // How close to the known structure
         if (nNat > 0) {
             var formed = 0
@@ -941,41 +991,95 @@ class ProteinEngine {
         return atan2(lb2 * (b1x * n2x + b1y * n2y + b1z * n2z), n1x * n2x + n1y * n2y + n1z * n2z)
     }
 
-    /** Cα RMSD after optimal superposition (Horn's quaternion method), over residues with known positions. */
-    fun rmsdToNative(): Double {
+    /**
+     * Best superposition (Horn's quaternion method) of the known structure onto the current coordinates, over
+     * residues with known positions. Returns [rmsd, r00…r22, native centre xyz, current centre xyz], or null.
+     */
+    private fun superpose(): DoubleArray? {
         var m = 0
         var ax = 0.0; var ay = 0.0; var az = 0.0; var bx = 0.0; var by = 0.0; var bz = 0.0
-        for (i in 0 until n) if (hasNat[i]) { m++; ax += x[i]; ay += y[i]; az += z[i]; bx += natX[i]; by += natY[i]; bz += natZ[i] }
-        if (m < 3) return Double.NaN
+        for (i in 0 until n) if (hasNat[i]) { m++; ax += natX[i]; ay += natY[i]; az += natZ[i]; bx += x[i]; by += y[i]; bz += z[i] }
+        if (m < 3) return null
         ax /= m; ay /= m; az /= m; bx /= m; by /= m; bz /= m
-        val s = DoubleArray(9); var g = 0.0
+        // S[a][b] = Σ native_a · current_b (centred); g = Σ |native|² + |current|²
+        var sxx = 0.0; var sxy = 0.0; var sxz = 0.0; var syx = 0.0; var syy = 0.0; var syz = 0.0; var szx = 0.0; var szy = 0.0; var szz = 0.0
+        var g = 0.0
         for (i in 0 until n) if (hasNat[i]) {
-            val p = doubleArrayOf(x[i] - ax, y[i] - ay, z[i] - az); val t = doubleArrayOf(natX[i] - bx, natY[i] - by, natZ[i] - bz)
-            for (a in 0..2) for (b in 0..2) s[a * 3 + b] += p[a] * t[b]
-            g += p[0] * p[0] + p[1] * p[1] + p[2] * p[2] + t[0] * t[0] + t[1] * t[1] + t[2] * t[2]
+            val px = natX[i] - ax; val py = natY[i] - ay; val pz = natZ[i] - az
+            val qx = x[i] - bx; val qy = y[i] - by; val qz = z[i] - bz
+            sxx += px * qx; sxy += px * qy; sxz += px * qz
+            syx += py * qx; syy += py * qy; syz += py * qz
+            szx += pz * qx; szy += pz * qy; szz += pz * qz
+            g += px * px + py * py + pz * pz + qx * qx + qy * qy + qz * qz
         }
-        val (sxx, sxy, sxz) = Triple(s[0], s[1], s[2]); val (syx, syy, syz) = Triple(s[3], s[4], s[5]); val (szx, szy, szz) = Triple(s[6], s[7], s[8])
         val k = arrayOf(
             doubleArrayOf(sxx + syy + szz, syz - szy, szx - sxz, sxy - syx),
             doubleArrayOf(syz - szy, sxx - syy - szz, sxy + syx, szx + sxz),
             doubleArrayOf(szx - sxz, sxy + syx, -sxx + syy - szz, syz + szy),
             doubleArrayOf(sxy - syx, szx + sxz, syz + szy, -sxx - syy + szz),
         )
-        return sqrt(maxOf(0.0, (g - 2 * largestEigenvalue4(k)) / m))
+        val vec = Array(4) { r -> DoubleArray(4) { c -> if (r == c) 1.0 else 0.0 } }
+        jacobi4(k, vec)
+        var best = 0
+        for (d in 1 until 4) if (k[d][d] > k[best][best]) best = d
+        val w = vec[0][best]; val qx = vec[1][best]; val qy = vec[2][best]; val qz = vec[3][best]
+        val rmsd = sqrt(maxOf(0.0, (g - 2 * k[best][best]) / m))
+        return doubleArrayOf(rmsd,
+            w * w + qx * qx - qy * qy - qz * qz, 2 * (qx * qy - w * qz), 2 * (qx * qz + w * qy),
+            2 * (qx * qy + w * qz), w * w - qx * qx + qy * qy - qz * qz, 2 * (qy * qz - w * qx),
+            2 * (qx * qz - w * qy), 2 * (qy * qz + w * qx), w * w - qx * qx - qy * qy + qz * qz,
+            ax, ay, az, bx, by, bz)
     }
-    /** Largest eigenvalue of a symmetric 4×4 matrix by Jacobi rotations. */
-    private fun largestEigenvalue4(a: Array<DoubleArray>): Double {
-        repeat(60) {
+
+    /** Cα RMSD to the known structure after the best superposition, Å. */
+    fun rmsdToNative(): Double = superpose()?.get(0) ?: Double.NaN
+
+    /** Where each residue would sit if the real structure were laid over the chain as it is now. */
+    private fun updateTargets() {
+        targetsValid = true
+        val t = superpose() ?: return
+        for (i in 0 until n) if (hasNat[i]) {
+            val px = natX[i] - t[10]; val py = natY[i] - t[11]; val pz = natZ[i] - t[12]
+            tgX[i] = t[1] * px + t[2] * py + t[3] * pz + t[13]
+            tgY[i] = t[4] * px + t[5] * py + t[6] * pz + t[14]
+            tgZ[i] = t[7] * px + t[8] * py + t[9] * pz + t[15]
+        }
+    }
+    /** For tests: the assist target of residue i. */
+    fun assistTarget(i: Int): DoubleArray { if (!targetsValid) updateTargets(); return doubleArrayOf(tgX[i], tgY[i], tgZ[i]) }
+
+    /** Diagonalises a symmetric 4×4 matrix in place by Jacobi rotations, accumulating eigenvectors as columns of v. */
+    private fun jacobi4(a: Array<DoubleArray>, v: Array<DoubleArray>) {
+        for (sweep in 0 until 60) {
             var p = 0; var q = 1; var big = 0.0
             for (i in 0 until 4) for (j in i + 1 until 4) if (abs(a[i][j]) > big) { big = abs(a[i][j]); p = i; q = j }
-            if (big < 1e-12) return@repeat
+            if (big < 1e-12) return
             val theta = (a[q][q] - a[p][p]) / (2 * a[p][q])
             val t = (if (theta >= 0) 1.0 else -1.0) / (abs(theta) + sqrt(theta * theta + 1))
             val c = 1 / sqrt(t * t + 1); val sn = t * c
             for (r in 0 until 4) { val rp = a[r][p]; val rq = a[r][q]; a[r][p] = c * rp - sn * rq; a[r][q] = sn * rp + c * rq }
             for (r in 0 until 4) { val pr = a[p][r]; val qr = a[q][r]; a[p][r] = c * pr - sn * qr; a[q][r] = sn * pr + c * qr }
+            for (r in 0 until 4) { val rp = v[r][p]; val rq = v[r][q]; v[r][p] = c * rp - sn * rq; v[r][q] = sn * rp + c * rq }
         }
-        return maxOf(maxOf(a[0][0], a[1][1]), maxOf(a[2][2], a[3][3]))
+    }
+
+    // ---------- Per-residue facts, for the inspector ----------
+    class ResidueInfo(
+        val label: String, val aa: Char, val charge: Double, val pKa: Double?, val protonated: Boolean?,
+        val ss: Int, val contacts: Int, val partner: Int, val nativeFormed: Int, val nativeTotal: Int,
+    )
+    fun residueInfo(i: Int): ResidueInfo {
+        val site = sites.firstOrNull { it.res == i && it.active && (it.isCys || seq[i] in "DEHKRY") }
+        var c = 0
+        for (p in 0 until contacts.size) if (contacts.a[p] == i || contacts.b[p] == i) c++
+        var formed = 0; var total = 0
+        for (k in 0 until nNat) if (ncI[k] == i || ncJ[k] == i) {
+            total++
+            val a = ncI[k]; val b = ncJ[k]
+            val dx = x[a] - x[b]; val dy = y[a] - y[b]; val dz = z[a] - z[b]
+            if (dx * dx + dy * dy + dz * dz < (1.2 * ncR[k]) * (1.2 * ncR[k])) formed++
+        }
+        return ResidueInfo(residueLabel(i), seq[i], charge[i], site?.pKa, site?.prot, ss[i], c, partner[i], formed, total)
     }
 
     private fun angleAt(i: Int): Double {

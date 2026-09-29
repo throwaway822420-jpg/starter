@@ -270,6 +270,12 @@ data class Settings(
     /** 0 battery saver, 1 balanced, 2 extreme (fold as fast as possible) */
     val performance: Int = 1,
     val showProgress: Boolean = true,
+    /** Folding assist ("cheat"): 0 off, 1 gentle, 2 strong, 3 maximum */
+    val assist: Int = 0,
+    /** Urea, M */
+    val urea: Float = 0f,
+    /** Force pulling the ends apart, pN */
+    val pullPN: Float = 0f,
     val randomLength: Int = 120,
     val randomStyle: Int = 0,
     val randomOnWake: Boolean = true,
@@ -286,6 +292,7 @@ data class Settings(
             .putString("protein", protein).putInt("temp", temp).putFloat("ph", ph).putInt("salt", salt)
             .putFloat("redox", redox).putFloat("speed", speed).putInt("cycle", cycle)
             .putBoolean("hud", hud).putInt("performance", performance).putBoolean("showProgress", showProgress)
+            .putInt("assist", assist).putFloat("urea", urea).putFloat("pullPN", pullPN)
             .putInt("randomLength", randomLength).putInt("randomStyle", randomStyle).putBoolean("randomOnWake", randomOnWake)
             .putString("customJson", customJson).putFloat("nativeBias", nativeBias).putInt("crowding", crowding)
             .putInt("colorBy", colorBy).putInt("viewStyle", viewStyle)
@@ -313,6 +320,9 @@ data class Settings(
                 // Older versions had an on/off battery saver
                 performance = p.getInt("performance", if (p.getBoolean("saver", false)) 0 else d.performance),
                 showProgress = p.getBoolean("showProgress", d.showProgress),
+                assist = p.getInt("assist", d.assist),
+                urea = p.getFloat("urea", d.urea),
+                pullPN = p.getFloat("pullPN", d.pullPN),
                 randomLength = p.getInt("randomLength", d.randomLength),
                 randomStyle = p.getInt("randomStyle", d.randomStyle),
                 randomOnWake = p.getBoolean("randomOnWake", d.randomOnWake),

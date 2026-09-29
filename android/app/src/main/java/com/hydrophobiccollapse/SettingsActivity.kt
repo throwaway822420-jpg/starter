@@ -129,6 +129,7 @@ class SettingsActivity : Activity() {
             "${it.roundToInt()} mM · λD ${if (debye < 100) "%.1f".format(debye) else ">96"} Å"
         }) { update(s.copy(salt = it.roundToInt())) })
         col.addView(slider("Redox buffer", -1f, 1f, 0.1f, s.redox, { redoxLabel(it) }) { update(s.copy(redox = it)) })
+        col.addView(slider("Urea (chemical denaturant)", 0f, 8f, 0.5f, s.urea, { if (it == 0f) "none" else "${"%.1f".format(it)} M" }) { update(s.copy(urea = it)) })
         col.addView(label("Crowding (when there are several chains)"), margins(top = 10))
         val crowdingNames = listOf("Dilute: protein fills 3% of the space", "Crowded: 12%", "Cell-like: 25%, as in cytoplasm")
         col.addView(spinner(crowdingNames, s.crowding.coerceIn(0, 2)) { idx ->
@@ -144,6 +145,22 @@ class SettingsActivity : Activity() {
         col.addView(spinner(listOf("Auto: chains if several, else chemistry", "Chemistry", "Chain (one chain: rainbow N → C)"), s.colorBy.coerceIn(0, 2)) { idx ->
             if (idx != s.colorBy) update(s.copy(colorBy = idx))
         }, margins(top = 4))
+
+        col.addView(section("Experiments"))
+        col.addView(slider("Pull the ends apart (optical tweezers)", 0f, 300f, 10f, s.pullPN, { if (it == 0f) "off" else "${it.roundToInt()} pN" }) { update(s.copy(pullPN = it)) })
+        col.addView(body("Real proteins unfold under roughly 100–300 pN in single-molecule experiments.").apply { textSize = 12f }, margins(top = 2))
+        col.addView(label("Folding assist (cheat)"), margins(top = 12))
+        val assistNote = body("").apply { textSize = 12f }
+        fun assistText(a: Int) = when (a) {
+            0 -> "Off: the physics on its own."
+            3 -> "Maximum: drags every residue to its place. Folds in seconds, but it's no longer a simulation."
+            else -> "Adds forces toward the fold: with a known structure, pulls toward it; without one, squeezes the chain and makes it stickier."
+        }
+        col.addView(spinner(listOf("Off", "Gentle", "Strong", "Maximum"), s.assist.coerceIn(0, 3)) { idx ->
+            if (idx != s.assist) { update(s.copy(assist = idx)); assistNote.text = assistText(idx) }
+        }, margins(top = 4))
+        assistNote.text = assistText(s.assist)
+        col.addView(assistNote, margins(top = 4))
 
         col.addView(section("Playback"))
         col.addView(slider("Simulation speed", 0.25f, 3f, 0.25f, s.speed, { "${it}×" }) { update(s.copy(speed = it)) })
@@ -174,7 +191,7 @@ class SettingsActivity : Activity() {
         col.addView(row, margins(top = 14))
 
         col.addView(TextView(this).apply { text = colourKey(); textSize = 12f; setLineSpacing(0f, 1.35f) }, margins(top = 16))
-        col.addView(body("Drag a residue to pull it. Drag open space here to turn the molecule; on the home screen, swiping between pages turns it. Tap to stir the water. Double-tap to heat and unfold."), margins(top = 12))
+        col.addView(body("Tap a residue to inspect it. Drag a residue to pull it. Drag open space here to turn the molecule; on the home screen, swiping between pages turns it. Tap to stir the water. Double-tap to heat and unfold."), margins(top = 12))
     }
 
     // ---------- Protein picker, random mode and your own proteins ----------

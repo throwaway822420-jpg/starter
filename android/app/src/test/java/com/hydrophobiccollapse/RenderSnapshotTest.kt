@@ -108,6 +108,21 @@ class RenderSnapshotTest {
     }
 
     @Test
+    fun experimentFrames() {
+        // Readout with the folding funnel, and the inspector on a residue
+        val sim = Simulation(density = 1.5f, wallpaperMode = true)
+        sim.applySettings(Settings(protein = "ubq", hud = true))
+        sim.resize(1600, 1000)
+        repeat(40 * 30) { sim.update(1.0 / 30) }
+        sim.selectResidue(42)
+        sim.update(1.0 / 30)
+        val b = Bitmap.createBitmap(1600, 1000, Bitmap.Config.ARGB_8888)
+        sim.draw(Canvas(b)); save(b, "funnel-inspector.png")
+        frame("pulling.png", Settings(protein = "ubq", pullPN = 200f, viewStyle = 1), 30)
+        frame("assist-hemoglobin.png", Settings(protein = "hemoglobin", assist = 3, viewStyle = 1), 15)
+    }
+
+    @Test
     fun hemoglobinFrame() = frame("hemoglobin.png", Settings(protein = "hemoglobin", hud = true), 20)
 
     @Test

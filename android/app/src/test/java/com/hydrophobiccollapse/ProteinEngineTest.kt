@@ -290,4 +290,60 @@ ATOM 7 CA . PHE A 4 ? 26.772 33.436 9.197 2
         assertTrue("largest clump ${e.largestComplex} of 6", e.largestComplex >= 4)
     }
 
+
+    // ---------- Experiments and the folding assist ----------
+    @Test
+    fun assistTargetsSitOnTheRealStructureLaidOverTheChain() {
+        val p = Proteins.byId("ubq"); val ca = p.ca!!
+        val e = ProteinEngine(); e.load(p)
+        val a = 0.9; val b = 0.4
+        for (i in 0 until e.n) {
+            val x0 = ca[3 * i].toDouble(); val y0 = ca[3 * i + 1].toDouble(); val z0 = ca[3 * i + 2].toDouble()
+            val y1 = Math.cos(b) * y0 - Math.sin(b) * z0; val z1 = Math.sin(b) * y0 + Math.cos(b) * z0
+            e.x[i] = Math.cos(a) * x0 - Math.sin(a) * y1 + 7; e.y[i] = Math.sin(a) * x0 + Math.cos(a) * y1 - 3; e.z[i] = z1 + 11
+        }
+        e.assist = 2
+        for (i in 0 until e.n) {
+            val t = e.assistTarget(i)
+            assertEquals(e.x[i], t[0], 1e-6); assertEquals(e.y[i], t[1], 1e-6); assertEquals(e.z[i], t[2], 1e-6)
+        }
+    }
+
+    @Test
+    fun assistFoldsFaster() {
+        fun seconds(assist: Int): Int {
+            val e = ProteinEngine(); e.seed(17); e.assist = assist
+            e.load(Proteins.byId("myoglobin")); e.temperature = 300.0
+            for (s in 1..40) { e.step(2000); e.measure(); if (e.rmsd < 3.0 && e.q > 0.85) return s }
+            return 99
+        }
+        val maximum = seconds(3)
+        assertTrue("maximum assist took $maximum s", maximum <= 5)
+    }
+
+    @Test
+    fun ureaUnfolds() {
+        fun meanQ(urea: Double): Double {
+            val e = ProteinEngine(); e.seed(4); e.urea = urea
+            e.load(Proteins.byId("ubq")); e.temperature = 300.0
+            repeat(30) { e.step(2000) }
+            return (1..10).map { e.step(2000); e.measure(); e.q }.average()
+        }
+        val water = meanQ(0.0); val urea = meanQ(8.0)
+        assertTrue("Q in water $water, in 8 M urea $urea", urea < water - 0.2)
+    }
+
+    @Test
+    fun pullingStretchesTheChain() {
+        fun endToEnd(pn: Double): Double {
+            val e = ProteinEngine(); e.seed(5)
+            e.load(Proteins.byId("ubq")); e.temperature = 300.0
+            repeat(30) { e.step(2000) }
+            e.pullPN = pn
+            repeat(20) { e.step(2000) }
+            e.measure(); return e.endToEnd
+        }
+        val relaxed = endToEnd(0.0); val pulled = endToEnd(200.0)
+        assertTrue("ends $relaxed Å apart relaxed, $pulled Å at 200 pN", pulled > 150 && pulled > 3 * relaxed)
+    }
 }
